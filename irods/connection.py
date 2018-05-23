@@ -12,7 +12,7 @@ import ssl
 from irods.message import (
     iRODSMessage, StartupPack, AuthResponse, AuthChallenge,
     OpenedDataObjRequest, FileSeekResponse, StringStringMap, VersionResponse,
-    GSIAuthMessage, ClientServerNegotiation, Error)
+    GSIAuthMessage, OpenIDAuthMessage, ClientServerNegotiation, Error)
 from irods.exception import get_exception_by_code, NetworkException
 from irods import (
     MAX_PASSWORD_LENGTH, RESPONSE_LEN,
@@ -28,7 +28,6 @@ from irods.client_server_negotiation import (
 from irods.api_number import api_number
 
 logger = logging.getLogger(__name__)
-
 
 class Connection(object):
 
@@ -47,6 +46,8 @@ class Connection(object):
         elif scheme == 'gsi':
             self.client_ctx = None
             self._login_gsi()
+        elif scheme == 'openid':
+            self._login_openid()
         else:
             raise ValueError("Unknown authentication scheme %s" % scheme)
 
@@ -380,6 +381,83 @@ class Connection(object):
         self.gsi_client_auth_response()
 
         logger.info("GSI authorization validated")
+
+    def openid_client_auth_request(self):
+        message_body = OpenIDAuthMessage(
+            auth_scheme_='openid',
+            context_='a_user={};provider={};session_id={}'.format(
+                self.account.proxy_user, self.account.openid_provider, self.account.token)
+        )
+        auth_req = iRODSMessage(
+            msg_type='RODS_API_REQ', msg=message_body, int_info=1201)
+        self.send(auth_req)
+        return self.recv()
+
+    def openid_client_auth_response(self):
+        message = '%s=%s' % (AUTH_SCHEME_KEY, GSI_AUTH_SCHEME)
+        # IMPORTANT! padding
+        #len_diff = RESPONSE_LEN - len(message)
+        #message += "\0" * len_diff
+        message_body = AuthResponse(
+            response=message,
+            username=self.account.proxy_user + '#' + self.account.proxy_zone
+        )
+        auth_resp = iRODSMessage(
+            msg_type='RODS_API_REQ', int_info=704, msg=message_body)
+        self.send(auth_resp)
+        self.recv()
+
+    def parse_kvp_string(self, s):
+        d = {}
+        for term in s.split(';'):
+            p = term.split('=')
+            if len(p) == 2: d[p[0]] = p[1]
+            else: d[p[0]] = None
+        return d
+
+
+    def _login_openid(self):
+        def send_msg(sock, msg):
+            # messages for openid are sent as [len][message] where len is a little-endian integer
+            msg_len = struct.pack('<I', len(msg))
+            logger.debug('send_msg(msg={}), msg_len: {}'.format(msg, msg_len))
+            sock.send(msg_len)
+            sock.send(msg.encode('utf-8'))
+
+        def read_msg(sock):
+            msg_len = int(struct.unpack('<I', sock.recv(4))[0])
+            logger.debug('read_msg, msg_len: {}'.format(msg_len))
+            return sock.recv(msg_len).decode('utf-8')
+
+        req_result = self.openid_client_auth_request()
+        import xml.etree.ElementTree as ET
+        elem = ET.fromstring(req_result.msg).find('result_')
+        if elem is None:
+            raise RuntimeError('openid auth request response did not contain a result entry')
+        result_ = elem.text
+        logger.debug('result_: ' + result_)
+        result_map = self.parse_kvp_string(result_)
+        if 'port' not in result_map or 'nonce' not in result_map:
+            logger.info('req_result kvp map missing values: [%s]' % req_result)
+            raise RuntimeError('openid auth request result was missing required values')
+
+        host = self.account.host
+        port = int(result_map['port'])
+        nonce = result_map['nonce']
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        wrapped = ssl.wrap_socket(s, cert_reqs=ssl.CERT_NONE, ssl_version=ssl.PROTOCOL_SSLv23)
+        logger.debug('host: {}, port: {}, nonce: {}'.format(host, port, nonce))
+
+        # TODO currently disabling ssl cert validation
+        wrapped.connect((host, port))
+        send_msg(wrapped, nonce)
+        first = read_msg(wrapped)
+        if first == 'SUCCESS':
+            self.openid_client_auth_response()
+        else:
+            # no point trying an auth reponse
+            logger.debug('\n{}\n'.format(first))
+
 
     def read_file(self, desc, size=-1, buffer=None):
         if size < 0:

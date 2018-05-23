@@ -237,6 +237,10 @@ class GSIAuthMessage(Message):
     auth_scheme_ = StringProperty()
     context_ = StringProperty()
 
+class OpenIDAuthMessage(Message):
+    _name = 'authPlugReqInp_PI'
+    auth_scheme_ = StringProperty()
+    context_ = StringProperty()
 
 class IntegerIntegerMap(Message):
     _name = 'InxIvalPair_PI'
