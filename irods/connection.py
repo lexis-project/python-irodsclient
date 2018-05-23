@@ -386,7 +386,7 @@ class Connection(object):
         message_body = OpenIDAuthMessage(
             auth_scheme_='openid',
             context_='a_user={};provider={};session_id={}'.format(
-                self.account.proxy_user, self.account.openid_provider, self.account.token)
+                self.account.proxy_user, self.account.openid_provider, self.account.session_id)
         )
         auth_req = iRODSMessage(
             msg_type='RODS_API_REQ', msg=message_body, int_info=1201)
