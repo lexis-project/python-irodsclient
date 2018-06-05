@@ -383,10 +383,17 @@ class Connection(object):
         logger.info("GSI authorization validated")
 
     def openid_client_auth_request(self):
+        context = 'a_user={};provider={}'.format(self.account.proxy_user, self.account.openid_provider)
+        if getattr(self.account, 'session_id', None):
+            context += ';session_id=' + self.account.session_id
+        elif getattr(self.account, 'access_token', None):
+            context += ';access_token=' + self.account.access_token
+        else:
+            raise RuntimeError('openid auth request requires either a session_id or access_token')
+
         message_body = OpenIDAuthMessage(
             auth_scheme_='openid',
-            context_='a_user={};provider={};session_id={}'.format(
-                self.account.proxy_user, self.account.openid_provider, self.account.session_id)
+            context_=context
         )
         auth_req = iRODSMessage(
             msg_type='RODS_API_REQ', msg=message_body, int_info=1201)
