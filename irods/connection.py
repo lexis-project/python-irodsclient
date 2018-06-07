@@ -389,7 +389,8 @@ class Connection(object):
         elif getattr(self.account, 'access_token', None):
             context += ';access_token=' + self.account.access_token
         else:
-            raise RuntimeError('openid auth request requires either a session_id or access_token')
+            logger.info('OpenID auth request requires either a session_id or access_token. '
+                            + 'Failure to provide one will require a new authentication flow')
 
         message_body = OpenIDAuthMessage(
             auth_scheme_='openid',
@@ -452,19 +453,27 @@ class Connection(object):
         port = int(result_map['port'])
         nonce = result_map['nonce']
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # TODO currently disabling ssl cert validation
         wrapped = ssl.wrap_socket(s, cert_reqs=ssl.CERT_NONE, ssl_version=ssl.PROTOCOL_SSLv23)
         logger.debug('host: {}, port: {}, nonce: {}'.format(host, port, nonce))
 
-        # TODO currently disabling ssl cert validation
         wrapped.connect((host, port))
         send_msg(wrapped, nonce)
         first = read_msg(wrapped)
         if first == 'SUCCESS':
+            user_name = read_msg(wrapped)
+            session_id = read_msg(wrapped)
+        else:
+            logger.debug('\n{}\n'.format(first))
+            print('OpenID Authorization URL:\n' + first)
+            user_name = read_msg(wrapped)
+            session_id = read_msg(wrapped)
+        
+        if user_name and session_id:
             self.openid_client_auth_response()
         else:
-            # no point trying an auth reponse
-            logger.debug('\n{}\n'.format(first))
-
+            # no point trying an auth reponse if it failed
+            logger.error('Did not complete OpenID authentication flow')
 
     def read_file(self, desc, size=-1, buffer=None):
         if size < 0:
