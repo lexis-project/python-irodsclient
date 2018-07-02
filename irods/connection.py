@@ -383,7 +383,11 @@ class Connection(object):
         logger.info("GSI authorization validated")
 
     def openid_client_auth_request(self):
-        context = 'a_user={};provider={}'.format(self.account.proxy_user, self.account.openid_provider)
+        if getattr(self.account, 'openid_provider', None):
+            context = 'a_user={};provider={}'.format(self.account.proxy_user, self.account.openid_provider)
+        else:
+            context = 'a_user={}'.format(self.account.proxy_user)
+
         if getattr(self.account, 'session_id', None):
             context += ';session_id=' + self.account.session_id
         elif getattr(self.account, 'access_token', None):
@@ -468,6 +472,7 @@ class Connection(object):
             print('OpenID Authorization URL:\n' + first)
             user_name = read_msg(wrapped)
             session_id = read_msg(wrapped)
+            print('Received session information: {}'.format(session_id))
         
         if user_name and session_id:
             self.openid_client_auth_response()
