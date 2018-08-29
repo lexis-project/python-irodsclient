@@ -392,6 +392,8 @@ class Connection(object):
             context += ';session_id=' + self.account.session_id
         elif getattr(self.account, 'access_token', None):
             context += ';access_token=' + self.account.access_token
+        elif getattr(self.account, 'user_key', None):
+            context += ';user_key=' + self.account.user_key
         else:
             logger.info('OpenID auth request requires either a session_id or access_token. '
                             + 'Failure to provide one will require a new authentication flow')
