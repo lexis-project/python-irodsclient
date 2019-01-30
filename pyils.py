@@ -2,6 +2,7 @@
 import argparse
 import sys
 import json
+import getpass
 #import irods
 from irods.session import iRODSSession
 from irods.manager.collection_manager import CollectionManager
@@ -21,10 +22,14 @@ def main(argv):
         'port': env['irods_port'],
         'user': env['irods_user_name'],
         'zone': env['irods_zone_name'],
-        'authentication_scheme': 'openid'
+#        'authentication_scheme': 'openid'
     }
+    if 'authentication_scheme' in env:
+        kwargs['authentication_scheme'] = env['authentication_scheme']
     if 'openid_provider' in env:
         kwargs['openid_provider'] = env['openid_provider']
+    if kwargs.get('authentication_scheme', None) in [None, 'native']:
+        kwargs['password'] = getpass.getpass('Enter password: ')
 
     session = iRODSSession(**kwargs)
     coll_manager = CollectionManager(session)

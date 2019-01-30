@@ -1,12 +1,19 @@
 #!/bin/env python2
 import argparse
 import sys
+import time
 import json
 import os
 import getpass
-#import irods
+import humanize
 from irods.session import iRODSSession
-from irods.manager.collection_manager import CollectionManager
+#from irods.manager.collection_manager import CollectionManager
+
+def line_out(s):
+    # http://www.termsys.demon.co.uk/vtansi.htm
+    sys.stdout.write('\x1b[2K\r')
+    sys.stdout.write(str(s))
+    sys.stdout.flush()
 
 def main(argv):
     parser = argparse.ArgumentParser(description='pyiget: Get an iRODS file with Python')
@@ -25,11 +32,12 @@ def main(argv):
         'host': env['irods_host'],
         'port': env['irods_port'],
         'user': env['irods_user_name'],
-        'zone': env['irods_zone_name'],
-    #    'authentication_scheme': 'openid'
+        'zone': env['irods_zone_name']
     }
-    #if 'openid_provider' in env:
-    #    kwargs['openid_provider'] = env['openid_provider']
+    if 'authentication_scheme' in env:
+        kwargs['authentication_scheme'] = env['authentication_scheme']
+    if 'openid_provider' in env:
+        kwargs['openid_provider'] = env['openid_provider']
     if kwargs.get('authentication_scheme', None) in [None, 'native']:
         kwargs['password'] = getpass.getpass('Enter password: ')
 
@@ -39,27 +47,43 @@ def main(argv):
     # single object, not a collection
     dstpath = args.dstpath
     if dstpath is None:
-        # destination was specified
+        # destination was not specified
         dstpath = os.getcwd()
     srcpath = args.srcpath
     src_basename = os.path.basename(srcpath)
     if not dstpath.endswith(src_basename):
         dstpath = os.path.join(dstpath, src_basename)
-    print('reading {} into {}'.format(srcpath, dstpath))
 
-    remote_obj = session.data_objects.get(args.srcpath)
+    remote_obj = session.data_objects.get(srcpath)
+    print('reading {} into {}'.format(srcpath, dstpath))
+    window_start = 0.0
+    window_bytes = 0.0
+    total_bytes = 0
+    average_rate = 0.0
+    check_interval = 1.0 # seconds
     with remote_obj.open('r') as f_in:
-        chunk_size = 1024 * 64
+        # 2MiB chunks. Somewhat arbitrary, but pretty good in manual tests
+        chunk_size = 2 * 1024 * 1024 
         with open(dstpath, 'wb') as f_out:
+            window_start = time.time()
             while True:
                 chunk = f_in.read(chunk_size)
                 if len(chunk) <= 0:
                     break
+                total_bytes += len(chunk)
+                window_bytes += len(chunk)
                 f_out.write(chunk)
+                curr_time = time.time()
+                if curr_time >= window_start + check_interval:
+                    average_rate = 0.6 * average_rate + 0.4 * (window_bytes / (curr_time - window_start))
+                    line_out('Total transferred: {} B ({}), Approximate Current Rate: {} B/s ({}/s)'.format(
+                            total_bytes, humanize.naturalsize(total_bytes, binary=True),
+                            int(average_rate), humanize.naturalsize(average_rate, binary=True)))
+                    # reset window stats
+                    window_start = time.time()
+                    window_bytes = 0.0
 
-    #home_coll = coll_manager.get('/commonssharetestZone/home/' + env['irods_user_name'])
-    #coll = coll_manager.get(args.path)
-    #ls_coll(coll)
+    print('\nFinished read')
 
 if __name__ == '__main__':
-    main(sys.argv)
+    exit(main(sys.argv))
