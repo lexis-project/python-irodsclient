@@ -395,7 +395,7 @@ class Connection(object):
         elif getattr(self.account, 'user_key', None):
             context += ';user_key=' + self.account.user_key
         else:
-            logger.info('OpenID auth request requires either a session_id or access_token. '
+            logger.info('OpenID auth request requires either a session_id, an access_token or a user_key. '
                             + 'Failure to provide one will require a new authentication flow')
 
         message_body = OpenIDAuthMessage(
