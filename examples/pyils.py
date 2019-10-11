@@ -24,11 +24,11 @@ def main(argv):
         'zone': env['irods_zone_name'],
 #        'authentication_scheme': 'openid'
     }
-    if 'authentication_scheme' in env:
-        kwargs['authentication_scheme'] = env['authentication_scheme']
+    if 'irods_authentication_scheme' in env:
+        kwargs['irods_authentication_scheme'] = env['irods_authentication_scheme']
     if 'openid_provider' in env:
         kwargs['openid_provider'] = env['openid_provider']
-    if kwargs.get('authentication_scheme', None) in [None, 'native']:
+    if kwargs.get('irods_authentication_scheme', None) in [None, 'native']:
         kwargs['password'] = getpass.getpass('Enter password: ')
 
     session = iRODSSession(**kwargs)

@@ -34,8 +34,8 @@ def main(argv):
         'user': env['irods_user_name'],
         'zone': env['irods_zone_name']
     }
-    if 'authentication_scheme' in env:
-        kwargs['authentication_scheme'] = env['authentication_scheme']
+    if 'irods_authentication_scheme' in env:
+        kwargs['irods_authentication_scheme'] = env['irods_authentication_scheme']
     if 'openid_provider' in env:
         kwargs['openid_provider'] = env['openid_provider']
     if kwargs.get('authentication_scheme', None) in [None, 'native']:
