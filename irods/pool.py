@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class Pool(object):
-
+    currentAuth=None
     def __init__(self, account):
         self.account = account
         self._lock = threading.RLock()

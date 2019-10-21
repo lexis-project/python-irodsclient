@@ -472,8 +472,11 @@ class Connection(object):
         else:
             logger.debug('\n{}\n'.format(first))
             print('OpenID Authorization URL:\n' + first)
+            self.pool.currentAuth=first
+#this blocks, so info channel backwards neets to be setup here
             user_name = read_msg(wrapped)
             session_id = read_msg(wrapped)
+            self.pool.currentAuth=None
             print('Received session information: {}'.format(session_id))
         
         if user_name and session_id:
