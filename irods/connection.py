@@ -7,6 +7,7 @@ import six
 import struct
 import os
 import ssl
+import hashlib
 
 
 from irods.message import (
@@ -382,6 +383,16 @@ class Connection(object):
 
         logger.info("GSI authorization validated")
 
+# using same method as auth_microservice/token_service/util.py:sha256
+    def sha256(s):
+      if not is_str(s):
+        logging.debug("not a string instance: %s", s)
+        return None
+      hasher = hashlib.sha256()
+      hasher.update(s.encode('utf-8'))
+      return hasher.hexdigest()
+
+
     def openid_client_auth_request(self):
         if getattr(self.account, 'openid_provider', None):
             context = 'a_user={};provider={}'.format(self.account.proxy_user, self.account.openid_provider)
@@ -391,7 +402,12 @@ class Connection(object):
         if getattr(self.account, 'session_id', None):
             context += ';session_id=' + self.account.session_id
         elif getattr(self.account, 'access_token', None):
-            context += ';access_token=' + self.account.access_token
+# hash if >1024 bytes
+# using same method as auth_microservice/token_service/util.py:sha256
+            at=self.account.access_token
+            if len(at)>1024:
+               at=sha256(at)
+            context += ';access_token=' + at
         elif getattr(self.account, 'user_key', None):
             context += ';user_key=' + self.account.user_key
         else:
