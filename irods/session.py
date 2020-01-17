@@ -13,7 +13,6 @@ from irods.manager.resource_manager import ResourceManager
 from irods.exception import NetworkException
 from irods.password_obfuscation import decode
 
-
 class iRODSSession(object):
 
     def __init__(self, configure=True, **kwargs):
@@ -91,6 +90,7 @@ class iRODSSession(object):
     def configure(self, **kwargs):
         account = self._configure_account(**kwargs)
         self.pool = Pool(account)
+        self.block_on_authURL=kwargs.get ('block_on_authURL', True)
 
     def query(self, *args):
         return Query(self, *args)
@@ -117,7 +117,7 @@ class iRODSSession(object):
             conn = next(iter(self.pool.active))
             return conn.server_version
         except StopIteration:
-            conn = self.pool.get_connection()
+            conn = self.pool.get_connection(self.block_on_authURL)
             version = conn.server_version
             conn.release()
             return version

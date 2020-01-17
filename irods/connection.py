@@ -26,8 +26,14 @@ from irods.client_server_negotiation import (
     USE_SSL,
     CS_NEG_RESULT_KW)
 from irods.api_number import api_number
+from irods.exception import iRODSException
+
 
 logger = logging.getLogger(__name__)
+
+class ExceptionOpenIDAuthUrl(iRODSException):
+    def __init__(self, URL):
+        self.URL=URL
 
 try:
     basestring
@@ -42,13 +48,14 @@ def is_str(s):
 
 class Connection(object):
 
-    def __init__(self, pool, account):
+    def __init__(self, pool, account, block_on_authURL=True):
 
         self.pool = pool
         self.socket = None
         self.account = account
         self._client_signature = None
         self._server_version = self._connect()
+        self.block_on_authURL=block_on_authURL
 
         scheme = self.account.authentication_scheme
 
@@ -496,6 +503,8 @@ class Connection(object):
             user_name = read_msg(wrapped)
             session_id = read_msg(wrapped)
         else:
+            if (not self.block_on_authURL):
+               raise ExceptionOpenIDAuthUrl(first)
             logger.debug('\n{}\n'.format(first))
             print('OpenID Authorization URL:\n' + first)
             self.pool.currentAuth=first

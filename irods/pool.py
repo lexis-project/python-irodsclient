@@ -17,12 +17,12 @@ class Pool(object):
         self.idle = set()
         self.connection_timeout = DEFAULT_CONNECTION_TIMEOUT
 
-    def get_connection(self):
+    def get_connection(self, block_on_authURL=True):
         with self._lock:
             try:
                 conn = self.idle.pop()
             except KeyError:
-                conn = Connection(self, self.account)
+                conn = Connection(self, self.account, block_on_authURL=block_on_authURL)
             self.active.add(conn)
         logger.debug('num active: {}'.format(len(self.active)))
         return conn
