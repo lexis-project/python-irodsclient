@@ -242,6 +242,23 @@ class OpenIDAuthMessage(Message):
     auth_scheme_ = StringProperty()
     context_ = StringProperty()
 
+class _OrderedMultiMapping :
+    def keys(self):
+        return self._keys
+    def values(self):
+        return self._values
+    def __len__(self):
+        return len(self._keys)
+    def __init__(self, list_of_keyval_tuples ):
+        self.dedup = set()
+        self._keys = []
+        self._values = []
+        for k,v in list_of_keyval_tuples:
+            if (k,v) not in self.dedup:
+                self.dedup.add((k,v))
+                self._keys.append(k)
+                self._values.append(v)
+
 class IntegerIntegerMap(Message):
     _name = 'InxIvalPair_PI'
 

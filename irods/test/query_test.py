@@ -277,6 +277,55 @@ class TestSpecificQuery(unittest.TestCase):
             res = query.get_results()
             next(res)
 
+    def test_simultaneous_multiple_AVU_joins(self):
+        objects = []
+        decoys = []
+        try:
+            collection = self.coll_path
+            filename = 'test_multiple_AVU_joins'
+            file_path = '{collection}/{filename}'.format(**locals())
+            for x in range(3,9):
+                obj = helpers.make_object(self.sess, file_path+'-{}'.format(x))  # with metadata
+                objects.append(obj)
+                obj.metadata.add('A_meta','1{}'.format(x))
+                obj.metadata.add('B_meta','2{}'.format(x))
+                decoys.append(helpers.make_object(self.sess, file_path+'-dummy{}'.format(x)))   # without metadata
+            self.assertTrue( len(objects) > 0 )
+            q = self.sess.query(DataObject,DataObjectMeta).\
+                                            filter(DataObjectMeta.name == 'A_meta', DataObjectMeta.value <  '20').\
+                                            filter(DataObjectMeta.name == 'B_meta', DataObjectMeta.value >= '20')
+            self.assertTrue( len(list(q)) == len(objects) )
+            q = self.sess.query(DataObject,DataObjectMeta).\
+                                            filter(DataObjectMeta.name == 'B_meta').filter(DataObjectMeta.value < '28').\
+                                            filter(DataObjectMeta.name == 'B_meta').filter(Like(DataObjectMeta.value, '2_'))
+            self.assertTrue( len(list(q)) == len(objects)-1 )
+        finally:
+            for x in (objects + decoys):
+                x.unlink(force=True)
+            helpers.remove_unused_metadata( self.sess )
+
+    def test_multiple_criteria_on_one_column_name(self):
+        collection = self.coll_path
+        filename = 'test_multiple_AVU_joins'
+        file_path = '{collection}/{filename}'.format(**locals())
+        objects = []
+        nobj = 0
+        for x in range(3,9):
+            nobj += 2
+            obj1 = helpers.make_object(self.sess, file_path+'-{}'.format(x))
+            obj2 = helpers.make_object(self.sess, file_path+'-dummy{}'.format(x))
+            objects.extend([obj1,obj2])
+        self.assertTrue( nobj > 0 and len(objects) == nobj )
+        q = self.sess.query(Collection,DataObject)
+        dummy_test = [d for d in q if d[DataObject.name][-1:] != '8'
+                                  and d[DataObject.name][-7:-1] == '-dummy' ]
+        self.assertTrue( len(dummy_test) > 0 )
+        q = q. filter(Like(DataObject.name, '%-dummy_')).\
+               filter(Collection.name == collection) .\
+               filter(DataObject.name != (filename + '-dummy8'))
+        results = [r[DataObject.name] for r in q]
+        self.assertTrue(len(results) == len(dummy_test))
+
 
 if __name__ == '__main__':
     # let the tests find the parent irods lib
