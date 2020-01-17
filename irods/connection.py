@@ -9,7 +9,6 @@ import os
 import ssl
 import hashlib
 
-
 from irods.message import (
     iRODSMessage, StartupPack, AuthResponse, AuthChallenge,
     OpenedDataObjRequest, FileSeekResponse, StringStringMap, VersionResponse,
@@ -29,6 +28,17 @@ from irods.client_server_negotiation import (
 from irods.api_number import api_number
 
 logger = logging.getLogger(__name__)
+
+try:
+    basestring
+except NameError:
+    # basestring doesn't exist in py3
+    # (or better yet: str in py27 doesn't include unicode)
+    basestring = str
+
+
+def is_str(s):
+    return isinstance(s, basestring)
 
 class Connection(object):
 
@@ -384,7 +394,7 @@ class Connection(object):
         logger.info("GSI authorization validated")
 
 # using same method as auth_microservice/token_service/util.py:sha256
-    def sha256(s):
+    def sha256(self, s):
       if not is_str(s):
         logging.debug("not a string instance: %s", s)
         return None
@@ -406,7 +416,7 @@ class Connection(object):
 # using same method as auth_microservice/token_service/util.py:sha256
             at=self.account.access_token
             if len(at)>1024:
-               at=sha256(at)
+               at=self.sha256(at)
             context += ';access_token=' + at
         elif getattr(self.account, 'user_key', None):
             context += ';user_key=' + self.account.user_key
