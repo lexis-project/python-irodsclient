@@ -10,19 +10,20 @@ logger = logging.getLogger(__name__)
 
 class Pool(object):
     currentAuth=None
-    def __init__(self, account):
+    def __init__(self, account, block_on_authURL=True):
         self.account = account
+        self.block_on_authURL=block_on_authURL
         self._lock = threading.RLock()
         self.active = set()
         self.idle = set()
         self.connection_timeout = DEFAULT_CONNECTION_TIMEOUT
 
-    def get_connection(self, block_on_authURL=True):
+    def get_connection(self):
         with self._lock:
             try:
                 conn = self.idle.pop()
             except KeyError:
-                conn = Connection(self, self.account, block_on_authURL=block_on_authURL)
+                conn = Connection(self, self.account, block_on_authURL=self.block_on_authURL)
             self.active.add(conn)
         logger.debug('num active: {}'.format(len(self.active)))
         return conn

@@ -89,8 +89,7 @@ class iRODSSession(object):
 
     def configure(self, **kwargs):
         account = self._configure_account(**kwargs)
-        self.pool = Pool(account)
-        self.block_on_authURL=kwargs.get ('block_on_authURL', True)
+        self.pool = Pool(account, kwargs.get ('block_on_authURL', True))
 
     def query(self, *args):
         return Query(self, *args)
@@ -117,7 +116,7 @@ class iRODSSession(object):
             conn = next(iter(self.pool.active))
             return conn.server_version
         except StopIteration:
-            conn = self.pool.get_connection(self.block_on_authURL)
+            conn = self.pool.get_connection()
             version = conn.server_version
             conn.release()
             return version
