@@ -188,7 +188,7 @@ class ClientServerNegotiation(Message):
 class StartupPack(Message):
     _name = 'StartupPack_PI'
 
-    def __init__(self, proxy_user, client_user):
+    def __init__(self, proxy_user, client_user, application_name = ''):
         super(StartupPack, self).__init__()
         if proxy_user and client_user:
             self.irodsProt = 1
@@ -197,7 +197,7 @@ class StartupPack(Message):
             self.clientUser, self.clientRcatZone = client_user
             self.relVersion = "rods{}.{}.{}".format(*IRODS_VERSION)
             self.apiVersion = "{3}".format(*IRODS_VERSION)
-            self.option = ""
+            self.option = application_name
 
     irodsProt = IntegerProperty()
     reconnFlag = IntegerProperty()
@@ -223,6 +223,12 @@ class AuthChallenge(Message):
     _name = 'authRequestOut_PI'
     challenge = BinaryProperty(64)
 
+
+class AuthPluginOut(Message):
+    _name = 'authPlugReqOut_PI'
+    result_ = StringProperty()
+    # result_ = BinaryProperty(16)
+
 # define InxIvalPair_PI "int iiLen; int *inx(iiLen); int *ivalue(iiLen);"
 
 
@@ -232,7 +238,7 @@ class BinBytesBuf(Message):
     buf = BinaryProperty()
 
 
-class GSIAuthMessage(Message):
+class PluginAuthMessage(Message):
     _name = 'authPlugReqInp_PI'
     auth_scheme_ = StringProperty()
     context_ = StringProperty()
@@ -258,6 +264,21 @@ class _OrderedMultiMapping :
                 self.dedup.add((k,v))
                 self._keys.append(k)
                 self._values.append(v)
+
+class _OrderedMultiMapping :
+    def keys(self):
+        return self._keys
+    def values(self):
+        return self._values
+    def __len__(self):
+        return len(self._keys)
+    def __init__(self, list_of_keyval_tuples ):
+        self._keys = []
+        self._values = []
+        for k,v in list_of_keyval_tuples:
+            self._keys.append(k)
+            self._values.append(v)
+
 
 class IntegerIntegerMap(Message):
     _name = 'InxIvalPair_PI'

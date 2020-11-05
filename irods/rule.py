@@ -1,39 +1,31 @@
 from __future__ import absolute_import
-import six
 from irods.message import iRODSMessage, StringStringMap, RodsHostAddress, STR_PI, MsParam, MsParamArray, RuleExecutionRequest
 from irods.api_number import api_number
-
-if six.PY3:
-    from html import escape
-else:
-    from cgi import escape
-
-import logging
-
-logger = logging.getLogger(__name__)
-
+from io import open as io_open
 
 class Rule(object):
     def __init__(self, session, rule_file=None, body='', params=None, output=''):
         self.session = session
 
+        self.params = {}
+        self.output = ''
+
         if rule_file:
             self.load(rule_file)
         else:
-            self.body = '@external\n' + escape(body, quote=True)
-            if params is None:
-                self.params = {}
-            else:
-                self.params = params
+            self.body = '@external\n' + body
+
+        # overwrite params and output if received arguments
+        if params is not None:
+            self.params = params
+        if output != '':
             self.output = output
 
-    def load(self, rule_file):
-        self.params = {}
-        self.output = ''
+    def load(self, rule_file, encoding = 'utf-8'):
         self.body = '@external\n'
 
         # parse rule file
-        with open(rule_file) as f:
+        with io_open(rule_file, encoding = encoding) as f:
             for line in f:
                 # parse input line
                 if line.strip().lower().startswith('input'):
@@ -61,14 +53,14 @@ class Rule(object):
 
                 # parse rule
                 else:
-                    self.body += escape(line, quote=True)
+                    self.body += line
 
 
     def execute(self):
         # rule input
         param_array = []
         for label, value in self.params.items():
-            inOutStruct = STR_PI(myStr=escape(value, quote=True))
+            inOutStruct = STR_PI(myStr=value)
             param_array.append(MsParam(label=label, type='STR_PI', inOutStruct=inOutStruct))
 
         inpParamArray = MsParamArray(paramLen=len(param_array), oprType=0, MsParam_PI=param_array)

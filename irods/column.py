@@ -1,4 +1,5 @@
 from __future__ import absolute_import
+import six
 from datetime import datetime
 from calendar import timegm
 
@@ -38,6 +39,20 @@ class Criterion(object):
     def value(self):
         return self.query_key.column_type.to_irods(self._value)
 
+class In(Criterion):
+
+    def __init__(self, query_key, value):
+        super(In, self).__init__('in', query_key, value)
+
+    @property
+    def value(self):
+        v = "("
+        comma = ""
+        for element in self._value:
+            v += "{}'{}'".format(comma,element)
+            comma = ","
+        v += ")"
+        return v
 
 class Like(Criterion):
 
@@ -113,6 +128,12 @@ class String(ColumnType):
 
     @staticmethod
     def to_irods(data):
+        try:
+            # Convert to Unicode string (aka decode)
+            data = six.text_type(data, 'utf-8', 'replace')
+        except TypeError:
+            # Some strings are already Unicode so they do not need decoding
+            pass
         return u"'{}'".format(data)
 
 
