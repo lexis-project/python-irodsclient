@@ -11,6 +11,7 @@ from irods.manager.metadata_manager import MetadataManager
 from irods.manager.access_manager import AccessManager
 from irods.manager.user_manager import UserManager, UserGroupManager
 from irods.manager.resource_manager import ResourceManager
+from irods.manager.zone_manager import ZoneManager
 from irods.exception import NetworkException
 from irods.password_obfuscation import decode
 from irods import NATIVE_AUTH_SCHEME, PAM_AUTH_SCHEME
@@ -33,6 +34,7 @@ class iRODSSession(object):
         self.users = UserManager(self)
         self.user_groups = UserGroupManager(self)
         self.resources = ResourceManager(self)
+        self.zones = ZoneManager(self)
 
     def __enter__(self):
         return self
@@ -100,6 +102,9 @@ class iRODSSession(object):
         account = self._configure_account(**kwargs)
         connection_refresh_time = self.get_connection_refresh_time(**kwargs)
         self.pool = Pool(account, application_name=kwargs.pop('application_name',''), connection_refresh_time=connection_refresh_time, 
+                         block_on_authURL=kwargs.get ('block_on_authURL', True))
+        logger.debug("In iRODSSession's configure(). connection_refresh_time set to {}".format(connection_refresh_time))
+        self.pool = Pool(account, application_name=kwargs.pop('application_name',''), connection_refresh_time=connection_refresh_time,
                          block_on_authURL=kwargs.get ('block_on_authURL', True))
 
     def query(self, *args):
@@ -190,6 +195,11 @@ class iRODSSession(object):
 
     def get_connection_refresh_time(self, **kwargs):
         connection_refresh_time = -1
+        
+        connection_refresh_time = int(kwargs.get('refresh_time', -1))
+        if connection_refresh_time != -1:
+            return connection_refresh_time
+
         try:
             env_file = kwargs['irods_env_file']
         except KeyError:
