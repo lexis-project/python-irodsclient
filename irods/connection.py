@@ -12,7 +12,7 @@ import datetime
 from irods.message import (
     iRODSMessage, StartupPack, AuthResponse, AuthChallenge, AuthPluginOut,
     OpenedDataObjRequest, FileSeekResponse, StringStringMap, VersionResponse,
-    GSIAuthMessage, OpenIDAuthMessage, ClientServerNegotiation, Error, PluginAuthMessage)
+    OpenIDAuthMessage, ClientServerNegotiation, Error, PluginAuthMessage)
 from irods.exception import get_exception_by_code, NetworkException
 from irods import (
     MAX_PASSWORD_LENGTH, RESPONSE_LEN,
