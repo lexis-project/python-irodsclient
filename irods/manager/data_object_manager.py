@@ -52,13 +52,14 @@ class DataObjectManager(Manager):
             .filter(DataObject.name == irods_basename(path))\
             .filter(DataObject.collection_id == parent.id)\
             .add_keyword(kw.ZONE_KW, path.split('/')[1])
+
         results = query.all() # get up to max_rows replicas
         if len(results) <= 0:
             raise ex.DataObjectDoesNotExist()
         return iRODSDataObject(self, parent, results)
 
 
-    def put(self, file, irods_path, **options):
+    def put(self, file, irods_path, return_data_object=False, **options):
         if irods_path.endswith('/'):
             obj = irods_path + os.path.basename(file)
         else:
@@ -76,8 +77,11 @@ class DataObjectManager(Manager):
             options[kw.UPDATE_REPL_KW] = ''
             self.replicate(obj, **options)
 
+        if return_data_object:
+            return self.get(obj)
 
-    def create(self, path, resource=None, **options):
+
+    def create(self, path, resource=None, force=False, **options):
         options[kw.DATA_TYPE_KW] = 'generic'
 
         if resource:
@@ -88,6 +92,9 @@ class DataObjectManager(Manager):
                 options[kw.DEST_RESC_NAME_KW] = self.sess.default_resource
             except AttributeError:
                 pass
+
+        if force:
+            options[kw.FORCE_FLAG_KW] = ''
 
         message_body = FileOpenRequest(
             objPath=path,

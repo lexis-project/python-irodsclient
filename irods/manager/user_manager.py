@@ -1,10 +1,5 @@
 from __future__ import absolute_import
 import logging
-import six
-if six.PY3:
-    from html import escape
-else:
-    from cgi import escape
 
 from irods.models import User, UserGroup
 from irods.manager import Manager
@@ -35,7 +30,8 @@ class UserManager(Manager):
         message_body = GeneralAdminRequest(
             "add",
             "user",
-            user_name,
+            user_name if not user_zone or user_zone == self.sess.zone \
+                      else "{}#{}".format(user_name,user_zone),
             user_type,
             user_zone,
             auth_str
@@ -74,11 +70,6 @@ class UserManager(Manager):
             if option == 'password':
                 current_password = self.sess.pool.account.password
                 new_value = obf.obfuscate_new_password(new_value, current_password, conn.client_signature)
-
-                # html style escaping might have to be generalized:
-                # https://github.com/irods/irods/blob/4.2.1/lib/core/src/packStruct.cpp#L1913
-                # https://github.com/irods/irods/blob/4.2.1/lib/core/src/packStruct.cpp#L1331-L1368
-                new_value = escape(new_value, quote=False)
 
             message_body = GeneralAdminRequest(
                 "modify",

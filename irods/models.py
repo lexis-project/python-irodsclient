@@ -22,6 +22,7 @@ class Model(six.with_metaclass(ModelBase, object)):
 class Zone(Model):
     id = Column(Integer, 'ZONE_ID', 101)
     name = Column(String, 'ZONE_NAME', 102)
+    type = Column(String, 'ZONE_TYPE', 103)
 
 
 class User(Model):
@@ -112,6 +113,8 @@ class DataObjectMeta(Model):
     name = Column(String, 'COL_META_DATA_ATTR_NAME', 600)
     value = Column(String, 'COL_META_DATA_ATTR_VALUE', 601)
     units = Column(String, 'COL_META_DATA_ATTR_UNITS', 602)
+    create_time = Column(DateTime, 'COL_META_DATA_CREATE_TIME', 604)
+    modify_time = Column(DateTime, 'COL_META_DATA_MODIFY_TIME', 605)
 
 
 class CollectionMeta(Model):
@@ -119,6 +122,9 @@ class CollectionMeta(Model):
     name = Column(String, 'COL_META_COLL_ATTR_NAME', 610)
     value = Column(String, 'COL_META_COLL_ATTR_VALUE', 611)
     units = Column(String, 'COL_META_COLL_ATTR_UNITS', 612)
+    create_time = Column(DateTime, 'COL_META_COLL_CREATE_TIME', 614)
+    modify_time = Column(DateTime, 'COL_META_COLL_MODIFY_TIME', 615)
+
 
 
 class ResourceMeta(Model):
@@ -126,6 +132,9 @@ class ResourceMeta(Model):
     name = Column(String, 'COL_META_RESC_ATTR_NAME', 630)
     value = Column(String, 'COL_META_RESC_ATTR_VALUE', 631)
     units = Column(String, 'COL_META_RESC_ATTR_UNITS', 632)
+    create_time = Column(DateTime, 'COL_META_RESC_CREATE_TIME', 634)
+    modify_time = Column(DateTime, 'COL_META_RESC_MODIFY_TIME', 635)
+
 
 
 class UserMeta(Model):
@@ -133,6 +142,9 @@ class UserMeta(Model):
     name = Column(String, 'COL_META_USER_ATTR_NAME', 640)
     value = Column(String, 'COL_META_USER_ATTR_VALUE', 641)
     units = Column(String, 'COL_META_USER_ATTR_UNITS', 642)
+    create_time = Column(DateTime, 'COL_META_USER_CREATE_TIME', 644)
+    modify_time = Column(DateTime, 'COL_META_USER_MODIFY_TIME', 645)
+
 
 
 class DataAccess(Model):
