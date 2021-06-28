@@ -40,7 +40,7 @@ setup(name='python-irodsclient',
                         'six>=1.10.0',
                         'PrettyTable>=0.7.2',
                         'xmlrunner>=1.7.7',
-                        'humanize'
+                        'humanize',
                         'xmlrunner>=1.7.7'
                         # - the new syntax:
                         #'futures; python_version == "2.7"'
