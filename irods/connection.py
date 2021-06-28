@@ -8,11 +8,13 @@ import os
 import ssl
 import hashlib
 import datetime
+import irods.password_obfuscation as obf
+from ast import literal_eval as safe_eval
 
 from irods.message import (
     iRODSMessage, StartupPack, AuthResponse, AuthChallenge, AuthPluginOut,
     OpenedDataObjRequest, FileSeekResponse, StringStringMap, VersionResponse,
-    OpenIDAuthMessage, ClientServerNegotiation, Error, PluginAuthMessage)
+    OpenIDAuthMessage, ClientServerNegotiation, Error, PluginAuthMessage, GetTempPasswordOut)
 from irods.exception import get_exception_by_code, NetworkException
 from irods import (
     MAX_PASSWORD_LENGTH, RESPONSE_LEN,
@@ -63,6 +65,7 @@ class Connection(object):
         self._client_signature = None
         self._server_version = self._connect()
         self.block_on_authURL=block_on_authURL
+        self._disconnected = False
 
         scheme = self.account.authentication_scheme
 
@@ -82,14 +85,15 @@ class Connection(object):
 
     @property
     def server_version(self):
-        return tuple(int(x) for x in self._server_version.relVersion.replace('rods', '').split('.'))
-
+        detected = tuple(int(x) for x in self._server_version.relVersion.replace('rods', '').split('.'))
+        return (safe_eval(os.environ.get('IRODS_SERVER_VERSION','()'))
+                or detected)
     @property
     def client_signature(self):
         return self._client_signature
 
     def __del__(self):
-        if self.socket:
+        if self.socket and getattr(self,"_disconnected",False):
             self.disconnect()
 
     def send(self, message):
@@ -213,6 +217,7 @@ class Connection(object):
 
         try:
             s = socket.create_connection(address, timeout)
+            self._disconnected = False
         except socket.error:
             raise NetworkException(
                 "Could not connect to specified host and port: " +
@@ -291,6 +296,7 @@ class Connection(object):
         self.socket.shutdown(socket.SHUT_RDWR)
         self.socket.close()
         self.socket = None
+        self._disconnected = True
 
     def recvall(self, n):
         # Helper function to recv n bytes or return None if EOF is hit
@@ -703,3 +709,16 @@ class Connection(object):
 
         self.send(message)
         self.recv()
+
+    def temp_password(self):
+        request = iRODSMessage("RODS_API_REQ", msg=None,
+                               int_info=api_number['GET_TEMP_PASSWORD_AN'])
+
+        # Send and receive request
+        self.send(request)
+        response = self.recv()
+        logger.debug(response.int_info)
+
+        # Convert and return answer
+        msg = response.get_main_message(GetTempPasswordOut)
+        return obf.create_temp_password(msg.stringToHashWith, self.account.password)

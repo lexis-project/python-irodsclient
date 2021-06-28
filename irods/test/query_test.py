@@ -1,5 +1,6 @@
 #! /usr/bin/env python
 # -*- coding: utf-8 -*-
+from __future__ import print_function
 from __future__ import absolute_import
 import os
 import six
@@ -12,17 +13,23 @@ from datetime import datetime
 from irods.models import (User, UserMeta,
                           Resource, ResourceMeta,
                           Collection, CollectionMeta,
-                          DataObject, DataObjectMeta  )
+                          DataObject, DataObjectMeta,
+                          RuleExec)
 
+from tempfile import NamedTemporaryFile
 from irods.exception import MultipleResultsFound, CAT_UNKNOWN_SPECIFIC_QUERY, CAT_INVALID_ARGUMENT
 from irods.query import SpecificQuery
 from irods.column import Like, Between, In
 from irods.meta import iRODSMeta
+from irods.rule import Rule
 from irods import MAX_SQL_ROWS
+from irods.test.helpers import irods_shared_reg_resc_vault
 import irods.test.helpers as helpers
 from six.moves import range as py3_range
+import irods.keywords as kw
 
 IRODS_STATEMENT_TABLE_SIZE = 50
+
 
 def rows_returned(query):
     return len( list(query) )
@@ -34,6 +41,26 @@ class TestQuery(unittest.TestCase):
 
     More_than_one_batch = 2*MAX_SQL_ROWS # may need to increase if PRC default page
                                          #   size is increased beyond 500
+
+    register_resc = ''
+
+    @classmethod
+    def setUpClass(cls):
+        with helpers.make_session() as sess:
+            resource_name = helpers.get_register_resource(sess)
+            if resource_name:
+                cls.register_resc = resource_name
+
+    @classmethod
+    def tearDownClass(cls):
+        with helpers.make_session() as sess:
+            try:
+                if cls.register_resc:
+                    sess.resources.get(cls.register_resc).remove()
+            except Exception as e:
+                print( "Could not remove resc {!r} due to: {} ".format(cls.register_resc,e),
+                 file=sys.stderr)
+
 
     def setUp(self):
         self.sess = helpers.make_session()
@@ -311,21 +338,41 @@ class TestQuery(unittest.TestCase):
         results = [r[DataObject.name] for r in q]
         self.assertTrue(len(results) == len(dummy_test))
 
+
+    def common_dir_or_vault_info(self):
+        register_opts= {}
+        dir_ = None
+        if self.register_resc:
+            dir_ = irods_shared_reg_resc_vault()
+            register_opts[ kw.RESC_NAME_KW ] = self.register_resc
+        if not(dir_) and helpers.irods_session_host_local (self.sess):
+            dir_ = tempfile.gettempdir()
+        if not dir_:
+            return ()
+        else:
+            return (dir_ , register_opts)
+
+
     @unittest.skipIf(six.PY3, 'Test is for python2 only')
     def test_query_for_data_object_with_utf8_name_python2(self):
+        reg_info = self.common_dir_or_vault_info()
+        if not reg_info:
+            self.skipTest('server is non-localhost and no common path exists for object registration')
+        (dir_,resc_option) = reg_info
         filename_prefix = '_prefix_ǠǡǢǣǤǥǦǧǨǩǪǫǬǭǮǯǰǱǲǳǴǵǶǷǸ'
         self.assertEqual(self.FILENAME_PREFIX.encode('utf-8'), filename_prefix)
-        _,test_file = tempfile.mkstemp(prefix=filename_prefix)
+        _,test_file = tempfile.mkstemp(dir=dir_,prefix=filename_prefix)
         obj_path = os.path.join(self.coll.path, os.path.basename(test_file))
+        results = None
         try:
-            self.sess.data_objects.register(test_file, obj_path)
+            self.sess.data_objects.register(test_file, obj_path, **resc_option)
             results = self.sess.query(DataObject, Collection.name).filter(DataObject.path == test_file).first()
             result_logical_path = os.path.join(results[Collection.name], results[DataObject.name])
             result_physical_path = results[DataObject.path]
             self.assertEqual(result_logical_path, obj_path.decode('utf8'))
             self.assertEqual(result_physical_path, test_file.decode('utf8'))
         finally:
-            self.sess.data_objects.unregister(obj_path)
+            if results: self.sess.data_objects.unregister(obj_path)
             os.remove(test_file)
 
     # view/change this line in text editors under own risk:
@@ -333,6 +380,10 @@ class TestQuery(unittest.TestCase):
 
     @unittest.skipIf(six.PY2, 'Test is for python3 only')
     def test_query_for_data_object_with_utf8_name_python3(self):
+        reg_info = self.common_dir_or_vault_info()
+        if not reg_info:
+            self.skipTest('server is non-localhost and no common path exists for object registration')
+        (dir_,resc_option) = reg_info
         def python34_unicode_mkstemp( prefix, dir = None, open_mode = 0o777 ):
             file_path = os.path.join ((dir or os.environ.get('TMPDIR') or '/tmp'), prefix+'-'+str(uuid.uuid1()))
             encoded_file_path = file_path.encode('utf-8')
@@ -342,21 +393,24 @@ class TestQuery(unittest.TestCase):
             u'\u01e0\u01e1\u01e2\u01e3\u01e4\u01e5\u01e6\u01e7\u01e8\u01e9\u01ea\u01eb\u01ec\u01ed\u01ee\u01ef'\
             u'\u01f0\u01f1\u01f2\u01f3\u01f4\u01f5\u01f6\u01f7\u01f8'  # make more visible/changeable in VIM
         self.assertEqual(self.FILENAME_PREFIX, filename_prefix)
-        (fd,encoded_test_file) = tempfile.mkstemp(prefix=filename_prefix.encode('utf-8')) \
+        (fd,encoded_test_file) = tempfile.mkstemp(dir = dir_.encode('utf-8'),prefix=filename_prefix.encode('utf-8')) \
             if sys.version_info >= (3,5) \
-            else python34_unicode_mkstemp(prefix = filename_prefix)
+            else python34_unicode_mkstemp(dir = dir_, prefix = filename_prefix)
         self.assertTrue(os.path.exists(encoded_test_file))
         test_file = encoded_test_file.decode('utf-8')
         obj_path = os.path.join(self.coll.path, os.path.basename(test_file))
+        results = None
         try:
-            self.sess.data_objects.register(test_file, obj_path)
-            results = self.sess.query(DataObject, Collection.name).filter(DataObject.path == test_file).first()
-            result_logical_path = os.path.join(results[Collection.name], results[DataObject.name])
-            result_physical_path = results[DataObject.path]
-            self.assertEqual(result_logical_path, obj_path)
-            self.assertEqual(result_physical_path, test_file)
+            self.sess.data_objects.register(test_file, obj_path, **resc_option)
+            results = list(self.sess.query(DataObject, Collection.name).filter(DataObject.path == test_file))
+            if results:
+                results = results[0]
+                result_logical_path = os.path.join(results[Collection.name], results[DataObject.name])
+                result_physical_path = results[DataObject.path]
+                self.assertEqual(result_logical_path, obj_path)
+                self.assertEqual(result_physical_path, test_file)
         finally:
-            self.sess.data_objects.unregister(obj_path)
+            if results: self.sess.data_objects.unregister(obj_path)
             if fd is not None: os.close(fd)
             os.remove(encoded_test_file)
 
@@ -469,6 +523,23 @@ class TestQuery(unittest.TestCase):
                     iters += 1
                     if iters == batch_size - 1:
                         break # leave iteration unfinished
+
+    def test_rules_query__267(self):
+        unique = "Testing prc #267: queryable rule objects"
+        with NamedTemporaryFile(mode='w') as rfile:
+            rfile.write("""f() {{ delay('<EF>1m</EF>') {{ writeLine('serverLog','{unique}') }} }}\n"""
+                        """OUTPUT null\n""".format(**locals()))
+            rfile.flush()
+            ## create a delayed rule we can query against
+            myrule = Rule(self.sess, rule_file = rfile.name)
+            myrule.execute()
+        qu = self.sess.query(RuleExec.id).filter( Like(RuleExec.frequency,'%1m%'),
+                                                  Like(RuleExec.name, '%{unique}%'.format(**locals())) )
+        results = [row for row in qu]
+        self.assertEqual(1, len(results))
+        if results:
+            Rule(self.sess).remove_by_id( results[0][RuleExec.id] )
+
 
 class TestSpecificQuery(unittest.TestCase):
 
@@ -630,6 +701,7 @@ class TestSpecificQuery(unittest.TestCase):
                filter(DataObject.name != (filename + '-dummy8'))
         results = [r[DataObject.name] for r in q]
         self.assertTrue(len(results) == len(dummy_test))
+
 
 
 if __name__ == '__main__':

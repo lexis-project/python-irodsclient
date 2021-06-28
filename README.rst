@@ -16,7 +16,7 @@ Currently supported:
 - Execute direct SQL queries
 - Execute iRODS rules
 - Support read, write, and seek operations for files
-- PUT/GET data objects
+- Parallel PUT/GET data objects
 - Create collections
 - Rename collections
 - Delete collections
@@ -41,7 +41,7 @@ Installing
 ----------
 
 PRC requires Python 2.7 or 3.4+.
-To install with pip::
+Canonically, to install with pip::
 
  pip install python-irodsclient
 
@@ -49,13 +49,27 @@ or::
 
  pip install git+https://github.com/irods/python-irodsclient.git[@branch|@commit|@tag]
 
-
 Uninstalling
 ------------
 
 ::
 
  pip uninstall python-irodsclient
+
+Hazard: Outdated Python
+--------------------------
+With older versions of Python (as of this writing, the aforementioned 2.7 and 3.4), we
+can take preparatory steps toward securing workable versions of pip and virtualenv by
+using these commands::
+
+    $ pip install --upgrade --user pip'<21.0'
+    $ python -m pip install --user virtualenv
+
+We are then ready to use any of the following commands relevant to and required for the
+installation::
+
+    $ python -m virtualenv ... 
+    $ python -m pip install ...
 
 
 Establishing a (secure) connection
@@ -74,7 +88,7 @@ Using environment files (including any SSL settings) in ``~/.irods/``:
 >>> ssl_context = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cafile=None, capath=None, cadata=None)
 >>> ssl_settings = {'ssl_context': ssl_context}
 >>> with iRODSSession(irods_env_file=env_file, **ssl_settings) as session:
-...     pass
+...     # workload
 ...
 >>>
 
@@ -82,7 +96,7 @@ Passing iRODS credentials as keyword arguments:
 
 >>> from irods.session import iRODSSession
 >>> with iRODSSession(host='localhost', port=1247, user='bob', password='1234', zone='tempZone') as session:
-...     pass
+...     # workload
 ...
 >>>
 
@@ -91,11 +105,75 @@ If you're an administrator acting on behalf of another user:
 >>> from irods.session import iRODSSession
 >>> with iRODSSession(host='localhost', port=1247, user='rods', password='1234', zone='tempZone',
            client_user='bob', client_zone='possibly_another_zone') as session:
-...     pass
+...     # workload
 ...
 >>>
 
 If no ``client_zone`` is provided, the ``zone`` parameter is used in its place.
+
+A pure Python SSL session (without a local `env_file`) requires a few more things defined:
+
+>>> import ssl
+>>> from irods.session import iRODSSession 
+>>> ssl_context = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cafile='CERTNAME.crt', capath=None, cadata=None)
+>>> ssl_settings = {'client_server_negotiation': 'request_server_negotiation',
+...                'client_server_policy': 'CS_NEG_REQUIRE',
+...                'encryption_algorithm': 'AES-256-CBC',
+...                'encryption_key_size': 32,
+...                'encryption_num_hash_rounds': 16,
+...                'encryption_salt_size': 8,                        
+...                'ssl_context': ssl_context}
+>>>
+>>> with iRODSSession(host='HOSTNAME_DEFINED_IN_CAFILE_ABOVE', port=1247, user='bob', password='1234', zone='tempZone', **ssl_settings) as session:
+...	# workload
+>>>
+
+
+Maintaining a connection
+------------------------
+
+The default library timeout for a connection to an iRODS Server is 120 seconds.
+
+This can be overridden by changing the session `connection_timeout` immediately after creation of the session object:
+
+>>> session.connection_timeout = 300
+
+This will set the timeout to five minutes for any associated connections.
+
+Session objects and cleanup
+---------------------------
+
+When iRODSSession objects are kept as state in an application, spurious SYS_HEADER_READ_LEN_ERR errors
+can sometimes be seen in the connected iRODS server's log file. This is frequently seen at program exit
+because socket connections are terminated without having been closed out by the session object's 
+cleanup() method.
+
+Starting with PRC Release 0.9.0, code has been included in the session object's __del__ method to call
+cleanup(), properly closing out network connections.  However, __del__ cannot be relied to run under all
+circumstances (Python2 being more problematic), so an alternative may be to call session.cleanup() on
+any session variable which might not be used again.
+
+
+Simple PUTs and GETs
+--------------------
+
+We can use the just-created session object to put files to (or get them from) iRODS.
+
+>>> logical_path = "/{0.zone}/home/{0.username}/{1}".format(session,"myfile.dat")
+>>> session.data_objects.put( "myfile.dat", logical_path)
+>>> session.data_objects.get( logical_path, "/tmp/myfile.dat.copy" )
+
+Note that local file paths may be relative, but iRODS data objects must always be referred to by
+their absolute paths.  This is in contrast to the ``iput`` and ``iget`` icommands, which keep
+track of the current working collection (as modified by ``icd``) for the unix shell.
+
+
+Parallel Transfer
+-----------------
+
+Starting with release 0.9.0, data object transfers using put() and get() will spawn a number
+of threads in order to optimize performance for iRODS server versions 4.2.9+ and file sizes
+larger than a default threshold value of 32 Megabytes.
 
 
 Working with collections
@@ -275,6 +353,35 @@ of the (type of) catalog object they once annotated:
 >>> remove_unused_metadata(session)
 >>> len(list( session.query(ResourceMeta) ))
 0
+
+
+Atomic operations on metadata
+-----------------------------
+
+With release 4.2.8 of iRODS, the atomic metadata API was introduced to allow a group of metadata add and remove
+operations to be performed transactionally, within a single call to the server.  This capability can be leveraged in
+version 0.8.6 of the PRC.
+
+So, for example, if 'obj' is a handle to an object in the iRODS catalog (whether a data object, collection, user or
+storage resource), we can send an arbitrary number of AVUOperation instances to be executed together as one indivisible
+operation on that object:
+
+>>> from irods.meta import iRODSMeta, AVUOperation
+>>> obj.metadata.apply_atomic_operations( AVUOperation(operation='remove', avu=iRODSMeta('a1','v1','these_units')),
+...                                       AVUOperation(operation='add', avu=iRODSMeta('a2','v2','those_units')),
+...                                       AVUOperation(operation='remove', avu=iRODSMeta('a3','v3')) # , ...
+... )
+
+The list of operations will applied in the order given, so that a "remove" followed by an "add" of the same AVU
+is, in effect, a metadata "set" operation.  Also note that a "remove" operation will be ignored if the AVU value given
+does not exist on the target object at that point in the sequence of operations.
+
+We can also source from a pre-built list of AVUOperations using Python's `f(*args_list)` syntax. For example, this
+function uses the atomic metadata API to very quickly remove all AVUs from an object:
+
+>>> def remove_all_avus( Object ):
+...     avus_on_Object = Object.metadata.items()
+...     Object.metadata.apply_atomic_operations( *[AVUOperation(operation='remove', avu=i) for i in avus_on_Object] )
 
 
 General queries
@@ -657,6 +764,18 @@ We can also query on access type using its numeric value, which will seem more n
 >>> OWN = 1200; MODIFY = 1120 ; READ = 1050
 >>> from irods.models import DataAccess, DataObject, User
 >>> data_objects_writable = list(session.query(DataObject,DataAccess,User)).filter(User.name=='alice',  DataAccess.type >= MODIFY)
+
+
+Managing users
+--------------
+
+You can create a user in the current zone (with an optional auth_str):
+
+>>> session.users.create('user', 'rodsuser', 'MyZone', auth_str)
+
+If you want to create a user in a federated zone, use:
+
+>>> session.users.create('user', 'rodsuser', 'OtherZone', auth_str)
 
 
 And more...

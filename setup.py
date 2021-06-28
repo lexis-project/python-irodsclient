@@ -41,5 +41,10 @@ setup(name='python-irodsclient',
                         'PrettyTable>=0.7.2',
                         'xmlrunner>=1.7.7',
                         'humanize'
-                        ]
+                        'xmlrunner>=1.7.7'
+                        # - the new syntax:
+                        #'futures; python_version == "2.7"'
+                        ],
+      # - the old syntax:
+      extras_require={ ':python_version == "2.7"': ['futures'] }
       )
