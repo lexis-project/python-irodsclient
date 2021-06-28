@@ -21,6 +21,7 @@ setup(name='python-irodsclient',
       author_email='support@irods.org',
       description='A python API for iRODS',
       long_description=long_description,
+      long_description_content_type='text/x-rst',
       license='BSD',
       url='https://github.com/irods/python-irodsclient',
       keywords='irods',
@@ -39,6 +40,11 @@ setup(name='python-irodsclient',
                         'six>=1.10.0',
                         'PrettyTable>=0.7.2',
                         'xmlrunner>=1.7.7',
-                        'humanize'
-                        ]
+                        'humanize',
+                        'xmlrunner>=1.7.7'
+                        # - the new syntax:
+                        #'futures; python_version == "2.7"'
+                        ],
+      # - the old syntax:
+      extras_require={ ':python_version == "2.7"': ['futures'] }
       )

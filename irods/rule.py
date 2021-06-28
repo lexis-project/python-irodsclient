@@ -1,39 +1,50 @@
 from __future__ import absolute_import
-import six
 from irods.message import iRODSMessage, StringStringMap, RodsHostAddress, STR_PI, MsParam, MsParamArray, RuleExecutionRequest
 from irods.api_number import api_number
+from io import open as io_open
+from irods.message import Message, StringProperty
 
-if six.PY3:
-    from html import escape
-else:
-    from cgi import escape
-
-import logging
-
-logger = logging.getLogger(__name__)
-
+class RemoveRuleMessage(Message):
+    #define RULE_EXEC_DEL_INP_PI "str ruleExecId[NAME_LEN];"
+    _name = 'RULE_EXEC_DEL_INP_PI'
+    ruleExecId = StringProperty()
+    def __init__(self,id_):
+        super(RemoveRuleMessage,self).__init__()
+        self.ruleExecId = str(id_)
 
 class Rule(object):
     def __init__(self, session, rule_file=None, body='', params=None, output=''):
         self.session = session
 
+        self.params = {}
+        self.output = ''
+
         if rule_file:
             self.load(rule_file)
         else:
-            self.body = '@external\n' + escape(body, quote=True)
-            if params is None:
-                self.params = {}
-            else:
-                self.params = params
+            self.body = '@external\n' + body
+
+        # overwrite params and output if received arguments
+        if params is not None:
+            self.params = params
+        if output != '':
             self.output = output
 
-    def load(self, rule_file):
-        self.params = {}
-        self.output = ''
+    def remove_by_id(self,*ids):
+        with self.session.pool.get_connection() as conn:
+            for id_ in ids:
+                request = iRODSMessage("RODS_API_REQ", msg=RemoveRuleMessage(id_),
+                                       int_info=api_number['RULE_EXEC_DEL_AN'])
+                conn.send(request)
+                response = conn.recv()
+                if response.int_info != 0:
+                    raise RuntimeError("Error removing rule {id_}".format(**locals()))
+
+    def load(self, rule_file, encoding = 'utf-8'):
         self.body = '@external\n'
 
         # parse rule file
-        with open(rule_file) as f:
+        with io_open(rule_file, encoding = encoding) as f:
             for line in f:
                 # parse input line
                 if line.strip().lower().startswith('input'):
@@ -61,14 +72,14 @@ class Rule(object):
 
                 # parse rule
                 else:
-                    self.body += escape(line, quote=True)
+                    self.body += line
 
 
     def execute(self):
         # rule input
         param_array = []
         for label, value in self.params.items():
-            inOutStruct = STR_PI(myStr=escape(value, quote=True))
+            inOutStruct = STR_PI(myStr=value)
             param_array.append(MsParam(label=label, type='STR_PI', inOutStruct=inOutStruct))
 
         inpParamArray = MsParamArray(paramLen=len(param_array), oprType=0, MsParam_PI=param_array)

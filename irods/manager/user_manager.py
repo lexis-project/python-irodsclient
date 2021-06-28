@@ -1,15 +1,10 @@
 from __future__ import absolute_import
 import logging
-import six
-if six.PY3:
-    from html import escape
-else:
-    from cgi import escape
 
 from irods.models import User, UserGroup
 from irods.manager import Manager
-from irods.message import GeneralAdminRequest, iRODSMessage
-from irods.exception import UserDoesNotExist, UserGroupDoesNotExist, NoResultFound
+from irods.message import GeneralAdminRequest, iRODSMessage, GetTempPasswordForOtherRequest, GetTempPasswordForOtherOut
+from irods.exception import UserDoesNotExist, UserGroupDoesNotExist, NoResultFound, CAT_SQL_ERR
 from irods.api_number import api_number
 from irods.user import iRODSUser, iRODSUserGroup
 import irods.password_obfuscation as obf
@@ -35,7 +30,8 @@ class UserManager(Manager):
         message_body = GeneralAdminRequest(
             "add",
             "user",
-            user_name,
+            user_name if not user_zone or user_zone == self.sess.zone \
+                      else "{}#{}".format(user_name,user_zone),
             user_type,
             user_zone,
             auth_str
@@ -62,6 +58,30 @@ class UserManager(Manager):
             response = conn.recv()
         logger.debug(response.int_info)
 
+    def temp_password_for_user(self, user_name):
+        with self.sess.pool.get_connection() as conn:
+            message_body = GetTempPasswordForOtherRequest(
+                targetUser=user_name,
+                unused=None
+            )
+            request = iRODSMessage("RODS_API_REQ", msg=message_body,
+                                   int_info=api_number['GET_TEMP_PASSWORD_FOR_OTHER_AN'])
+
+            # Send request
+            conn.send(request)
+
+            # Receive answer
+            try:
+                response = conn.recv()
+                logger.debug(response.int_info)
+            except CAT_SQL_ERR:
+                raise UserDoesNotExist()
+
+            # Convert and return answer
+            msg = response.get_main_message(GetTempPasswordForOtherOut)
+            return obf.create_temp_password(msg.stringToHashWith, conn.account.password)
+
+
     def modify(self, user_name, option, new_value, user_zone=""):
 
         # must append zone to username for this API call
@@ -74,11 +94,6 @@ class UserManager(Manager):
             if option == 'password':
                 current_password = self.sess.pool.account.password
                 new_value = obf.obfuscate_new_password(new_value, current_password, conn.client_signature)
-
-                # html style escaping might have to be generalized:
-                # https://github.com/irods/irods/blob/4.2.1/lib/core/src/packStruct.cpp#L1913
-                # https://github.com/irods/irods/blob/4.2.1/lib/core/src/packStruct.cpp#L1331-L1368
-                new_value = escape(new_value, quote=False)
 
             message_body = GeneralAdminRequest(
                 "modify",

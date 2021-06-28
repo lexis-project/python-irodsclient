@@ -1,6 +1,9 @@
+"""Define objects related to communication with iRODS server API endpoints."""
+
 import struct
 import logging
 import socket
+import json
 import xml.etree.ElementTree as ET
 from irods.message.message import Message
 from irods.message.property import (BinaryProperty, StringProperty,
@@ -58,6 +61,15 @@ def _recv_message_into(sock, buffer, size):
         index += rsize
     return mv[:index]
 
+#------------------------------------
+
+class BinBytesBuf(Message):
+    _name = 'BinBytesBuf_PI'
+    buflen = IntegerProperty()
+    buf = BinaryProperty()
+
+class JSON_Binary_Response(BinBytesBuf):
+    pass
 
 class iRODSMessage(object):
 
@@ -67,6 +79,15 @@ class iRODSMessage(object):
         self.error = error
         self.bs = bs
         self.int_info = int_info
+
+    def get_json_encoded_struct (self):
+        Xml = ET.fromstring(self.msg.replace(b'\0',b''))
+        json_str = Xml.find('buf').text
+        if Xml.tag == 'BinBytesBuf_PI':
+            mybin = JSON_Binary_Response()
+            mybin.unpack(Xml)
+            json_str = mybin.buf.replace(b'\0',b'').decode()
+        return json.loads( json_str )
 
     @staticmethod
     def recv(sock):
@@ -188,7 +209,7 @@ class ClientServerNegotiation(Message):
 class StartupPack(Message):
     _name = 'StartupPack_PI'
 
-    def __init__(self, proxy_user, client_user):
+    def __init__(self, proxy_user, client_user, application_name = ''):
         super(StartupPack, self).__init__()
         if proxy_user and client_user:
             self.irodsProt = 1
@@ -197,7 +218,7 @@ class StartupPack(Message):
             self.clientUser, self.clientRcatZone = client_user
             self.relVersion = "rods{}.{}.{}".format(*IRODS_VERSION)
             self.apiVersion = "{3}".format(*IRODS_VERSION)
-            self.option = ""
+            self.option = application_name
 
     irodsProt = IntegerProperty()
     reconnFlag = IntegerProperty()
@@ -223,16 +244,52 @@ class AuthChallenge(Message):
     _name = 'authRequestOut_PI'
     challenge = BinaryProperty(64)
 
+
+class AuthPluginOut(Message):
+    _name = 'authPlugReqOut_PI'
+    result_ = StringProperty()
+    # result_ = BinaryProperty(16)
+
 # define InxIvalPair_PI "int iiLen; int *inx(iiLen); int *ivalue(iiLen);"
 
+class JSON_Binary_Request(BinBytesBuf):
 
-class BinBytesBuf(Message):
-    _name = 'BinBytesBuf_PI'
+    """A message body whose payload is BinBytesBuf containing JSON."""
+
+    def __init__(self,msg_struct):
+        """Initialize with a Python data structure that will be converted to JSON."""
+        super(JSON_Binary_Request,self).__init__()
+        string = json.dumps(msg_struct)
+        self.buf = string
+        self.buflen = len(string)
+
+class BytesBuf(Message):
+
+    """A generic structure carrying text content"""
+
+    _name = 'BytesBuf_PI'
     buflen = IntegerProperty()
-    buf = BinaryProperty()
+    buf = StringProperty()
+    def __init__(self,string,*v,**kw):
+        super(BytesBuf,self).__init__(*v,**kw)
+        self.buf = string
+        self.buflen = len(self.buf)
+
+class JSON_XMLFramed_Request(BytesBuf):
+
+    """A message body whose payload is a BytesBuf containing JSON."""
+    def __init__(self, msg_struct):
+        """Initialize with a Python data structure that will be converted to JSON."""
+        s = json.dumps(msg_struct)
+        super(JSON_XMLFramed_Request,self).__init__(s)
+
+def JSON_Message( msg_struct , server_version = () ):
+    cls = JSON_XMLFramed_Request if server_version < (4,2,9) \
+          else JSON_Binary_Request
+    return cls(msg_struct)
 
 
-class GSIAuthMessage(Message):
+class PluginAuthMessage(Message):
     _name = 'authPlugReqInp_PI'
     auth_scheme_ = StringProperty()
     context_ = StringProperty()
@@ -258,6 +315,21 @@ class _OrderedMultiMapping :
                 self.dedup.add((k,v))
                 self._keys.append(k)
                 self._values.append(v)
+
+class _OrderedMultiMapping :
+    def keys(self):
+        return self._keys
+    def values(self):
+        return self._values
+    def __len__(self):
+        return len(self._keys)
+    def __init__(self, list_of_keyval_tuples ):
+        self._keys = []
+        self._values = []
+        for k,v in list_of_keyval_tuples:
+            self._keys.append(k)
+            self._values.append(v)
+
 
 class IntegerIntegerMap(Message):
     _name = 'InxIvalPair_PI'
@@ -361,6 +433,22 @@ class FileOpenRequest(Message):
     numThreads = IntegerProperty()
     oprType = IntegerProperty()
     KeyValPair_PI = SubmessageProperty(StringStringMap)
+
+class DataObjChksumRequest(FileOpenRequest):
+    """Report and/or generate a data object's checksum."""
+
+    def __init__(self,path,**chksumOptions):
+        """Construct the request using the path of a data object."""
+        super(DataObjChksumRequest,self).__init__()
+        for attr,prop in vars(FileOpenRequest).items():
+            if isinstance(prop, (IntegerProperty,LongProperty)):
+                setattr(self, attr, 0)
+        self.objPath = path
+        self.KeyValPair_PI = StringStringMap(chksumOptions)
+
+class DataObjChksumResponse(Message):
+    name = 'Str_PI'
+    myStr = StringProperty()
 
 # define OpenedDataObjInp_PI "int l1descInx; int len; int whence; int
 # oprType; double offset; double bytesWritten; struct KeyValPair_PI;"
@@ -476,6 +564,22 @@ class GeneralAdminRequest(Message):
     arg7 = StringProperty()
     arg8 = StringProperty()
     arg9 = StringProperty()
+
+
+class GetTempPasswordForOtherRequest(Message):
+    _name = 'getTempPasswordForOtherInp_PI'
+    targetUser = StringProperty()
+    unused = StringProperty()
+
+
+class GetTempPasswordForOtherOut(Message):
+    _name = 'getTempPasswordForOtherOut_PI'
+    stringToHashWith = StringProperty()
+
+
+class GetTempPasswordOut(Message):
+    _name = 'getTempPasswordOut_PI'
+    stringToHashWith = StringProperty()
 
 
 #define ticketAdminInp_PI "str *arg1; str *arg2; str *arg3; str *arg4; str *arg5; str *arg6;"

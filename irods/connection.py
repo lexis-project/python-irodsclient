@@ -4,19 +4,24 @@ import logging
 import struct
 import hashlib
 import six
-import struct
 import os
 import ssl
 import hashlib
+import datetime
+import irods.password_obfuscation as obf
+from ast import literal_eval as safe_eval
 
 from irods.message import (
-    iRODSMessage, StartupPack, AuthResponse, AuthChallenge,
+    iRODSMessage, StartupPack, AuthResponse, AuthChallenge, AuthPluginOut,
     OpenedDataObjRequest, FileSeekResponse, StringStringMap, VersionResponse,
-    GSIAuthMessage, OpenIDAuthMessage, ClientServerNegotiation, Error)
+    OpenIDAuthMessage, ClientServerNegotiation, Error, PluginAuthMessage, GetTempPasswordOut)
 from irods.exception import get_exception_by_code, NetworkException
 from irods import (
     MAX_PASSWORD_LENGTH, RESPONSE_LEN,
-    AUTH_SCHEME_KEY, GSI_AUTH_PLUGIN, GSI_AUTH_SCHEME, GSI_OID)
+    AUTH_SCHEME_KEY, AUTH_USER_KEY, AUTH_PWD_KEY, AUTH_TTL_KEY,
+    NATIVE_AUTH_SCHEME,
+    GSI_AUTH_PLUGIN, GSI_AUTH_SCHEME, GSI_OID,
+    PAM_AUTH_SCHEME)
 from irods.client_server_negotiation import (
     perform_negotiation,
     validate_policy,
@@ -46,7 +51,11 @@ except NameError:
 def is_str(s):
     return isinstance(s, basestring)
 
+class PlainTextPAMPasswordError(Exception): pass
+
 class Connection(object):
+
+    DISALLOWING_PAM_PLAINTEXT = True
 
     def __init__(self, pool, account, block_on_authURL=True):
 
@@ -56,29 +65,35 @@ class Connection(object):
         self._client_signature = None
         self._server_version = self._connect()
         self.block_on_authURL=block_on_authURL
+        self._disconnected = False
 
         scheme = self.account.authentication_scheme
 
-        if scheme == 'native':
+        if scheme == NATIVE_AUTH_SCHEME:
             self._login_native()
-        elif scheme == 'gsi':
+        elif scheme == GSI_AUTH_SCHEME:
             self.client_ctx = None
             self._login_gsi()
         elif scheme == 'openid':
             self._login_openid()
+        elif scheme == PAM_AUTH_SCHEME:
+            self._login_pam()
         else:
             raise ValueError("Unknown authentication scheme %s" % scheme)
+        self.create_time = datetime.datetime.now()
+        self.last_used_time = self.create_time
 
     @property
     def server_version(self):
-        return tuple(int(x) for x in self._server_version.relVersion.replace('rods', '').split('.'))
-
+        detected = tuple(int(x) for x in self._server_version.relVersion.replace('rods', '').split('.'))
+        return (safe_eval(os.environ.get('IRODS_SERVER_VERSION','()'))
+                or detected)
     @property
     def client_signature(self):
         return self._client_signature
 
     def __del__(self):
-        if self.socket:
+        if self.socket and getattr(self,"_disconnected",False):
             self.disconnect()
 
     def send(self, message):
@@ -202,15 +217,18 @@ class Connection(object):
 
         try:
             s = socket.create_connection(address, timeout)
+            self._disconnected = False
         except socket.error:
             raise NetworkException(
                 "Could not connect to specified host and port: " +
                 "{}:{}".format(*address))
 
         self.socket = s
+
         main_message = StartupPack(
             (self.account.proxy_user, self.account.proxy_zone),
-            (self.account.client_user, self.account.client_zone)
+            (self.account.client_user, self.account.client_zone),
+            self.pool.application_name
         )
 
         # No client-server negotiation
@@ -278,6 +296,7 @@ class Connection(object):
         self.socket.shutdown(socket.SHUT_RDWR)
         self.socket.close()
         self.socket = None
+        self._disconnected = True
 
     def recvall(self, n):
         # Helper function to recv n bytes or return None if EOF is hit
@@ -353,9 +372,10 @@ class Connection(object):
     def gsi_client_auth_request(self):
 
         # Request for authentication with GSI on current user
-        message_body = GSIAuthMessage(
+
+        message_body = PluginAuthMessage(
             auth_scheme_=GSI_AUTH_PLUGIN,
-            context_='a_user=%s' % self.account.client_user
+            context_='%s=%s' % (AUTH_USER_KEY, self.account.client_user)
         )
         # GSI = 1201
 # https://github.com/irods/irods/blob/master/lib/api/include/apiNumber.h#L158
@@ -520,6 +540,48 @@ class Connection(object):
             # no point trying an auth reponse if it failed
             logger.error('Did not complete OpenID authentication flow')
 
+    def _login_pam(self):
+
+        ctx_user = '%s=%s' % (AUTH_USER_KEY, self.account.client_user)
+        ctx_pwd = '%s=%s' % (AUTH_PWD_KEY, self.account.password)
+        ctx_ttl = '%s=%s' % (AUTH_TTL_KEY, "60")
+
+        ctx = ";".join([ctx_user, ctx_pwd, ctx_ttl])
+
+        if type(self.socket) is socket.socket:
+            if getattr(self,'DISALLOWING_PAM_PLAINTEXT',True):
+                raise PlainTextPAMPasswordError
+
+        message_body = PluginAuthMessage(
+            auth_scheme_=PAM_AUTH_SCHEME,
+            context_=ctx
+        )
+
+        auth_req = iRODSMessage(
+            msg_type='RODS_API_REQ',
+            msg=message_body,
+            # int_info=725
+            int_info=1201
+        )
+
+        self.send(auth_req)
+        # Getting the new password
+        output_message = self.recv()
+
+        auth_out = output_message.get_main_message(AuthPluginOut)
+
+        self.disconnect()
+        self._connect()
+
+        if hasattr(self.account,'store_pw'):
+            drop = self.account.store_pw
+            if type(drop) is list:
+                drop[:] = [ auth_out.result_ ]
+
+        self._login_native(password=auth_out.result_)
+
+        logger.info("PAM authorization validated")
+
     def read_file(self, desc, size=-1, buffer=None):
         if size < 0:
             size = len(buffer)
@@ -547,7 +609,11 @@ class Connection(object):
 
         return response.bs
 
-    def _login_native(self):
+    def _login_native(self, password=None):
+
+        # Default case, PAM login will send a new password
+        if password is None:
+            password = self.account.password
 
         # authenticate
         auth_req = iRODSMessage(msg_type='RODS_API_REQ', int_info=703)
@@ -569,11 +635,11 @@ class Connection(object):
         if six.PY3:
             challenge = challenge.strip()
             padded_pwd = struct.pack(
-                "%ds" % MAX_PASSWORD_LENGTH, self.account.password.encode(
+                "%ds" % MAX_PASSWORD_LENGTH, password.encode(
                     'utf-8').strip())
         else:
             padded_pwd = struct.pack(
-                "%ds" % MAX_PASSWORD_LENGTH, self.account.password)
+                "%ds" % MAX_PASSWORD_LENGTH, password)
 
         m = hashlib.md5()
         m.update(challenge)
@@ -643,3 +709,16 @@ class Connection(object):
 
         self.send(message)
         self.recv()
+
+    def temp_password(self):
+        request = iRODSMessage("RODS_API_REQ", msg=None,
+                               int_info=api_number['GET_TEMP_PASSWORD_AN'])
+
+        # Send and receive request
+        self.send(request)
+        response = self.recv()
+        logger.debug(response.int_info)
+
+        # Convert and return answer
+        msg = response.get_main_message(GetTempPasswordOut)
+        return obf.create_temp_password(msg.stringToHashWith, self.account.password)

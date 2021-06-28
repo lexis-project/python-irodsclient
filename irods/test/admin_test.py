@@ -2,14 +2,13 @@
 from __future__ import absolute_import
 import os
 import sys
-import string
-import random
 import unittest
 from irods.models import User
 from irods.exception import UserDoesNotExist, ResourceDoesNotExist
 from irods.session import iRODSSession
 from irods.resource import iRODSResource
 import irods.test.helpers as helpers
+import irods.keywords as kw
 
 
 class TestAdmin(unittest.TestCase):
@@ -155,30 +154,33 @@ class TestAdmin(unittest.TestCase):
         session.resources.add_child(comp.name, ufs1.name, 'archive')
         session.resources.add_child(comp.name, ufs2.name, 'cache')
 
-        # create object on compound resource
-        obj = session.data_objects.create(obj_path, comp.name)
+        obj = None
 
-        # write to object
-        with obj.open('w+') as obj_desc:
-            obj_desc.write(dummy_str)
+        try:
+            # create object on compound resource
+            obj = session.data_objects.create(obj_path, resource = comp.name)
 
-        # refresh object
-        obj = session.data_objects.get(obj_path)
+            # write to object
+            with obj.open('w+',**{kw.DEST_RESC_NAME_KW:comp.name}) as obj_desc:
+                obj_desc.write(dummy_str)
 
-        # check that we have 2 replicas
-        self.assertEqual(len(obj.replicas), 2)
+            # refresh object
+            obj = session.data_objects.get(obj_path)
 
-        # remove object
-        obj.unlink(force=True)
+            # check that we have 2 replicas
+            self.assertEqual(len(obj.replicas), 2)
+        finally:
+            # remove object
+            if obj: obj.unlink(force=True)
 
-        # remove children from compound resource
-        session.resources.remove_child(comp.name, ufs1.name)
-        session.resources.remove_child(comp.name, ufs2.name)
+            # remove children from compound resource
+            session.resources.remove_child(comp.name, ufs1.name)
+            session.resources.remove_child(comp.name, ufs2.name)
 
-        # remove resources
-        ufs1.remove()
-        ufs2.remove()
-        comp.remove()
+            # remove resources
+            ufs1.remove()
+            ufs2.remove()
+            comp.remove()
 
 
     def test_get_resource_children(self):
@@ -265,6 +267,9 @@ class TestAdmin(unittest.TestCase):
 
 
     def test_make_ufs_resource(self):
+        RESC_PATH_BASE = helpers.irods_shared_tmp_dir()
+        if not(RESC_PATH_BASE) and not helpers.irods_session_host_local (self.sess):
+            self.skipTest('for non-local server with shared tmp dir missing')
         # test data
         resc_name = 'temporary_test_resource'
         if self.sess.server_version < (4, 0, 0):
@@ -306,7 +311,9 @@ class TestAdmin(unittest.TestCase):
         obj = self.sess.data_objects.create(obj_path, resc_name)
 
         # write something to the file
-        with obj.open('w+') as obj_desc:
+        # (can omit use of DEST_RESC_NAME_KW on resolution of
+        #  https://github.com/irods/irods/issues/5548 )
+        with obj.open('w+', **{kw.DEST_RESC_NAME_KW: resc_name} ) as obj_desc:
             obj_desc.write(dummy_str)
 
         # refresh object (size has changed)
@@ -332,8 +339,8 @@ class TestAdmin(unittest.TestCase):
         zone = self.sess.zone
         self.sess.users.create(self.new_user_name, self.new_user_type)
 
-        # make a 12 character pseudo-random password
-        new_password = ''.join(random.choice(string.ascii_letters + string.digits + string.punctuation) for _ in range(12))
+        # make a really horrible password
+        new_password = '''abc123!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~Z'''
         self.sess.users.modify(username, 'password', new_password)
 
         # open a session as the new user
@@ -345,6 +352,46 @@ class TestAdmin(unittest.TestCase):
 
             # do something that connects to the server
             session.users.get(username)
+
+        # delete new user
+        self.sess.users.remove(self.new_user_name)
+
+        # user should be gone
+        with self.assertRaises(UserDoesNotExist):
+            self.sess.users.get(self.new_user_name)
+
+
+    def test_set_user_comment(self):
+        # make a new user
+        self.sess.users.create(self.new_user_name, self.new_user_type)
+
+        # modify user comment
+        new_comment = '''comment-abc123!"#$%&'()*+,-./:;<=>?@[\]^_{|}~Z''' # omitting backtick due to #170
+        self.sess.users.modify(self.new_user_name, 'comment', new_comment)
+
+        # check comment was modified
+        new_user = self.sess.users.get(self.new_user_name)
+        self.assertEqual(new_user.comment, new_comment)
+
+        # delete new user
+        self.sess.users.remove(self.new_user_name)
+
+        # user should be gone
+        with self.assertRaises(UserDoesNotExist):
+            self.sess.users.get(self.new_user_name)
+
+
+    def test_set_user_info(self):
+        # make a new user
+        self.sess.users.create(self.new_user_name, self.new_user_type)
+
+        # modify user info
+        new_info = '''info-abc123!"#$%&'()*+,-./:;<=>?@[\]^_{|}~Z''' # omitting backtick due to #170
+        self.sess.users.modify(self.new_user_name, 'info', new_info)
+
+        # check info was modified
+        new_user = self.sess.users.get(self.new_user_name)
+        self.assertEqual(new_user.info, new_info)
 
         # delete new user
         self.sess.users.remove(self.new_user_name)

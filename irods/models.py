@@ -19,9 +19,30 @@ class Model(six.with_metaclass(ModelBase, object)):
     pass
 
 
+class RuleExec(Model):
+    id = Column(Integer, 'RULE_EXEC_ID', 1000)
+    name = Column(String, 'RULE_EXEC_NAME', 1001)
+    rei_file_path = Column(String,'RULE_EXEC_REI_FILE_PATH', 1002)
+    user_name = Column(String, 'RULE_EXEC_USER_NAME', 1003)
+    time = Column(DateTime,'RULE_EXEC_TIME',    1005)
+    last_exe_time = Column(DateTime,'RULE_EXEC_LAST_EXE_TIME', 1010)
+    frequency = Column(String,'RULE_EXEC_FREQUENCY', 1006)
+    priority = Column(String, 'RULE_EXEC_PRIORITY', 1007)
+
+#   # If needed in 4.2.9, we can update the Query class to dynamically
+#   #  attach this field based on server version:
+#   context = Column(String, 'RULE_EXEC_CONTEXT', 1012)
+
+#   # These are either unused or usually absent:
+#   exec_status = Column(String,'RULE_EXEC_STATUS', 1011)
+#   address = Column(String,'RULE_EXEC_ADDRESS', 1004)
+#   notification_addr = Column('RULE_EXEC_NOTIFICATION_ADDR', 1009)
+
+
 class Zone(Model):
     id = Column(Integer, 'ZONE_ID', 101)
     name = Column(String, 'ZONE_NAME', 102)
+    type = Column(String, 'ZONE_TYPE', 103)
 
 
 class User(Model):
@@ -112,6 +133,8 @@ class DataObjectMeta(Model):
     name = Column(String, 'COL_META_DATA_ATTR_NAME', 600)
     value = Column(String, 'COL_META_DATA_ATTR_VALUE', 601)
     units = Column(String, 'COL_META_DATA_ATTR_UNITS', 602)
+    create_time = Column(DateTime, 'COL_META_DATA_CREATE_TIME', 604)
+    modify_time = Column(DateTime, 'COL_META_DATA_MODIFY_TIME', 605)
 
 
 class CollectionMeta(Model):
@@ -119,6 +142,9 @@ class CollectionMeta(Model):
     name = Column(String, 'COL_META_COLL_ATTR_NAME', 610)
     value = Column(String, 'COL_META_COLL_ATTR_VALUE', 611)
     units = Column(String, 'COL_META_COLL_ATTR_UNITS', 612)
+    create_time = Column(DateTime, 'COL_META_COLL_CREATE_TIME', 614)
+    modify_time = Column(DateTime, 'COL_META_COLL_MODIFY_TIME', 615)
+
 
 
 class ResourceMeta(Model):
@@ -126,6 +152,9 @@ class ResourceMeta(Model):
     name = Column(String, 'COL_META_RESC_ATTR_NAME', 630)
     value = Column(String, 'COL_META_RESC_ATTR_VALUE', 631)
     units = Column(String, 'COL_META_RESC_ATTR_UNITS', 632)
+    create_time = Column(DateTime, 'COL_META_RESC_CREATE_TIME', 634)
+    modify_time = Column(DateTime, 'COL_META_RESC_MODIFY_TIME', 635)
+
 
 
 class UserMeta(Model):
@@ -133,6 +162,9 @@ class UserMeta(Model):
     name = Column(String, 'COL_META_USER_ATTR_NAME', 640)
     value = Column(String, 'COL_META_USER_ATTR_VALUE', 641)
     units = Column(String, 'COL_META_USER_ATTR_UNITS', 642)
+    create_time = Column(DateTime, 'COL_META_USER_CREATE_TIME', 644)
+    modify_time = Column(DateTime, 'COL_META_USER_MODIFY_TIME', 645)
+
 
 
 class DataAccess(Model):

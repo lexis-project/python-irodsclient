@@ -13,7 +13,7 @@ OBJ_PATH_KW = "objPath"   # logical path of the object #
 RESC_NAME_KW = "rescName"   # resource name #
 DEST_RESC_NAME_KW = "destRescName"   # destination resource name #
 DEF_RESC_NAME_KW = "defRescName"   # default resource name #
-BACKUP_RESC_NAME_KW = "backupRescName"  # destination resource name #
+BACKUP_RESC_NAME_KW = "backupRescName"  # backup resource name #
 DATA_TYPE_KW = "dataType"   # data type #
 DATA_SIZE_KW = "dataSize"
 CHKSUM_KW = "chksum"
@@ -210,6 +210,7 @@ AGE_KW = "age"  # age of the file for itrim #
 # =-=-=-=-=-=-=-
 # irods general keywords definitions
 RESC_HIER_STR_KW = "resc_hier"
+REPLICA_TOKEN_KW = "replicaToken"
 DEST_RESC_HIER_STR_KW = "dest_resc_hier"
 IN_PDMO_KW = "in_pdmo"
 STAGE_OBJ_KW = "stage_object"

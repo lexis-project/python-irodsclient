@@ -1,6 +1,93 @@
 Changelog
 =========
 
+v1.0.0 (2021-06-03)
+-------------------
+[#274] calculate common vault dir for unicode query tests [Daniel Moore]
+[#269] better session cleanup [Daniel Moore]
+
+v0.9.0 (2021-05-14)
+-------------------
+[#269] cleanup() is now automatic with session destruct [Daniel Moore]
+[#235] multithreaded parallel transfer for PUT and GET [Daniel Moore]
+[#232] do not arbitrarily pick first replica for DEST RESC [Daniel Moore]
+[#233] add null handler for irods package root [Daniel Moore]
+[#246] implementation of checksum for data object manager [Daniel Moore]
+[#270] speed up tests [Daniel Moore]
+[#260] [irods/irods#5520] XML protocol will use BinBytesBuf in 4.2.9 [Daniel Moore]
+[#221] prepare test suite for CI [Daniel Moore]
+[#267] add RuleExec model for genquery [Daniel Moore]
+[#263] update documentation for connection_timeout [Terrell Russell]
+[#261] add temporary password support [Paul van Schayck]
+[#257] better SSL examples [Terrell Russell]
+[#255] make results of atomic metadata operations visible [Daniel Moore]
+[#250] add exception for SYS_INVALID_INPUT_PARAM [Daniel Moore]
+
+v0.8.6 (2021-01-22)
+-------------------
+[#244] added capability to add/remove atomic metadata [Daniel Moore]
+[#226] Document creation of users [Ruben Garcia]
+[#230] Add force option to data_object_manager create [Ruben Garcia]
+[#239] to keep the tests passing [Daniel Moore]
+[#239] add iRODSUser.info attribute [Pierre Gay]
+[#239] add iRODSUser.comment attribute [Pierre Gay]
+[#241] [irods/irods_capability_automated_ingest#136] fix redundant disconnect [Daniel Moore]
+[#227] [#228] enable ICAT entries for zones and foreign-zone users [Daniel Moore]
+
+v0.8.5 (2020-11-10)
+-------------------
+[#220] Use connection create time to determine stale connections [Kaivan Kamali]
+
+v0.8.4 (2020-10-19)
+-------------------
+[#221] fix tests which were failing in Py3.4 and 3.7 [Daniel Moore]
+[#220] Replace stale connections pulled from idle pools [Kaivan Kamali]
+[#3] tests failing on Python3 unicode defaults [Daniel Moore]
+[#214] store/load rules as utf-8 in files [Daniel Moore]
+[#211] set and report application name to server [Daniel Moore]
+[#156] skip ssh/pam login tests if user doesn't exist [Daniel Moore]
+[#209] pam/ssl/env auth tests imported from test harness [Daniel Moore]
+[#209] store hashed PAM pw [Daniel Moore]
+[#205] Disallow PAM plaintext passwords as strong default [Daniel Moore]
+[#156] fix the PAM authentication with env json file. [Patrice Linel]
+[#207] add raw-acl permissions getter [Daniel Moore]
+
+v0.8.3 (2020-06-05)
+-------------------
+- [#3] remove order sensitivity in test_user_dn [Daniel Moore]
+- [#5] clarify unlink specific replica example [Terrell Russell]
+- [irods/irods#4796] add data object copy tests [Daniel Moore]
+- [#5] Additional sections and examples in README [Daniel Moore]
+- [#187] Allow query on metadata create and modify times [Daniel Moore]
+- [#135] fix queries for multiple AVUs of same name [Daniel Moore]
+- [#135] Allow multiple criteria based on column name [Daniel Moore]
+- [#180] add the "in" genquery operator [Daniel Moore]
+- [#183] fix key error when tables from order_by() not in query() [Daniel Moore]
+- [#5] fix ssl example in README.rst [Terrell Russell]
+
+v0.8.2 (2019-11-13)
+-------------------
+- [#8] Add PAM Authentication handling (still needs tests) [Mattia D'Antonio]
+- [#5] Remove commented-out import [Alan King]
+- [#5] Add .idea directory to .gitignore [Jonathan Landrum]
+- [#150] Fix specific query argument labeling [Chris Klimowski]
+- [#148] DataObjectManager.put() can return the new data_object [Jonathan Landrum]
+- [#124] Convert strings going to irods to Unicode [Alan King]
+- [#161] Allow dynamic I/O for rule from file [Mathijs Koymans]
+- [#162] Include resc_hier in replica information [Brett Hartley]
+- [#165] Fix CAT_STATEMENT_TABLE_FULL by auto closing queries [Chris Smeele]
+- [#166] Test freeing statements in unfinished query [Daniel Moore]
+- [#167] Add metadata for user and usergroup objects [Erwin van Wieringen]
+- [#175] Add metadata property for instances of iRODSResource [Daniel Moore]
+- [#163] add keywords to query objects [Daniel Moore]
+
+v0.8.1 (2018-09-27)
+-------------------
+- [#140] Remove randomization from password test [Alan King]
+- [#139] Use uppercase queries in tests [Alan King]
+- [#137] Handle filenames with ampersands [Alan King]
+- [#126] Add size attribute to iRODSReplica [Alan King]
+
 v0.8.0 (2018-05-03)
 -------------------
 - Add rescName and replNum awareness. [Hao Xu]
