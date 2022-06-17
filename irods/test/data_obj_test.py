@@ -13,6 +13,9 @@ import contextlib  # check if redundant
 import logging
 import io
 import re
+import time
+import concurrent.futures
+import xml.etree.ElementTree
 
 from irods.models import Collection, DataObject
 import irods.exception as ex
@@ -21,10 +24,13 @@ from irods.data_object import chunks
 import irods.test.helpers as helpers
 import irods.keywords as kw
 from irods.manager import data_object_manager
+from irods.message import RErrorStack
+from irods.message import ( ET, XML_Parser_Type, default_XML_parser, current_XML_parser )
 from datetime import datetime
 from tempfile import NamedTemporaryFile
 from irods.test.helpers import (unique_name, my_function_name)
 import irods.parallel
+from irods.manager.data_object_manager import Server_Checksum_Warning
 
 
 def make_ufs_resc_in_tmpdir(session, base_name, allow_local = False):
@@ -81,6 +87,115 @@ class TestDataObjOps(unittest.TestCase):
             self.sess.resources.remove_child(Root,Leaf)
             self.sess.resources.remove(Leaf)
             self.sess.resources.remove(Root)
+
+    def test_data_write_stales_other_repls__ref_irods_5548(self):
+        test_data = 'irods_5548_testfile'
+        test_coll = '/{0.zone}/home/{0.username}'.format(self.sess)
+        test_path = test_coll + "/" + test_data
+        demoResc = self.sess.resources.get('demoResc').name
+        self.sess.data_objects.open(test_path, 'w',**{kw.DEST_RESC_NAME_KW: demoResc}).write(b'random dater')
+
+        with self.create_simple_resc() as newResc:
+            try:
+                with self.sess.data_objects.open(test_path, 'a', **{kw.DEST_RESC_NAME_KW: newResc}) as d:
+                    d.seek(0,2)
+                    d.write(b'z')
+                data = self.sess.data_objects.get(test_path)
+                statuses = { repl.resource_name: repl.status for repl in data.replicas }
+                self.assertEqual( '0', statuses[demoResc] )
+                self.assertEqual( '1', statuses[newResc] )
+            finally:
+                self.cleanup_data_object(test_path)
+
+
+    def cleanup_data_object(self,data_logical_path):
+        try:
+            self.sess.data_objects.get(data_logical_path).unlink(force = True)
+        except ex.DataObjectDoesNotExist:
+            pass
+
+
+    def write_and_check_replica_on_parallel_connections( self, data_object_path, root_resc, caller_func, required_num_replicas = 1, seconds_to_wait_for_replicas = 10):
+        """Helper function for testing irods/irods#5548 and irods/irods#5848.
+
+        Writes the  string "books\n" to a replica, but not as a single write operation.
+        It is done piecewise on two independent connections, essentially simulating parallel "put".
+        Then we assert the file contents and dispose of the data object."""
+
+        try:
+            self.sess.data_objects.create(data_object_path, resource = root_resc)
+            for _ in range( seconds_to_wait_for_replicas ):
+                if required_num_replicas <= len( self.sess.data_objects.get(data_object_path).replicas ): break
+                time.sleep(1)
+            else:
+                raise RuntimeError("Did not see %d replicas" % required_num_replicas)
+            fd1 = self.sess.data_objects.open(data_object_path, 'w', **{kw.DEST_RESC_NAME_KW: root_resc} )
+            (replica_token, hier_str) = fd1.raw.replica_access_info()
+            fd2 = self.sess.data_objects.open(data_object_path, 'a', finalize_on_close = False, **{kw.RESC_HIER_STR_KW: hier_str,
+                                                                                                   kw.REPLICA_TOKEN_KW: replica_token})
+            fd2.seek(4) ; fd2.write(b's\n')
+            fd1.write(b'book')
+            fd2.close()
+            fd1.close()
+            with self.sess.data_objects.open(data_object_path, 'r', **{kw.DEST_RESC_NAME_KW: root_resc} ) as f:
+                self.assertEqual(f.read(), b'books\n')
+        except Exception as e:
+            logging.debug('Exception %r in [%s], called from [%s]', e, my_function_name(), caller_func)
+            raise
+        finally:
+            if 'fd2' in locals() and not fd2.closed: fd2.close()
+            if 'fd1' in locals() and not fd1.closed: fd1.close()
+            self.cleanup_data_object( data_object_path )
+
+
+    def test_parallel_conns_to_repl_with_cousin__irods_5848(self):
+        """Cousins = resource nodes not sharing any common parent nodes."""
+        data_path = '/{0.zone}/home/{0.username}/cousin_resc_5848.dat'.format(self.sess)
+
+        #
+        # -- Create replicas of a data object under two different root resources and test parallel write: --
+
+        with self.create_simple_resc() as newResc:
+
+            # - create empty data object on demoResc
+            self.sess.data_objects.open(data_path, 'w',**{kw.DEST_RESC_NAME_KW: 'demoResc'})
+
+            # - replicate data object to newResc
+            self.sess.data_objects.get(data_path).replicate(newResc)
+
+            # - test whether a write to the replica on newResc functions correctly.
+            self.write_and_check_replica_on_parallel_connections( data_path, newResc, my_function_name(), required_num_replicas = 2)
+
+
+    def test_parallel_conns_with_replResc__irods_5848(self):
+        session = self.sess
+        replication_resource = None
+        ufs_resources = []
+        replication_resource = self.sess.resources.create('repl_resc_1_5848', 'replication')
+        number_of_replicas = 2
+        # -- Create replicas of a data object by opening it on a replication resource; then, test parallel write --
+        try:
+            # Build up the replication resource with `number_of_replicas' being the # of children
+            for i in range(number_of_replicas):
+                resource_name = unique_name(my_function_name(),i)
+                resource_type = 'unixfilesystem'
+                resource_host = session.host
+                resource_path = '/tmp/' + resource_name
+                ufs_resources.append(session.resources.create(
+                    resource_name, resource_type, resource_host, resource_path))
+                session.resources.add_child(replication_resource.name, resource_name)
+            data_path = '/{0.zone}/home/{0.username}/Replicated_5848.dat'.format(self.sess)
+
+            # -- Perform the check of writing by a single replica (which is unspecified, but one of the `number_of_replicas`
+            #    will be selected by voting)
+
+            self.write_and_check_replica_on_parallel_connections (data_path, replication_resource.name, my_function_name(), required_num_replicas = 2)
+        finally:
+            for resource in ufs_resources:
+                session.resources.remove_child(replication_resource.name, resource.name)
+                resource.remove()
+            if replication_resource:
+                replication_resource.remove()
 
     def test_put_get_parallel_autoswitch_A__235(self):
         if not self.sess.data_objects.should_parallelize_transfer(server_version_hint = self.SERVER_VERSION):
@@ -175,6 +290,78 @@ class TestDataObjOps(unittest.TestCase):
             for chunk in chunks(f, block_size):
                 sha256.update(chunk)
         return sha256.hexdigest()
+
+    def test_routine_verify_chksum_operation( self ):
+
+        if self.sess.server_version < (4, 2, 11):
+            self.skipTest('iRODS servers < 4.2.11 do not raise a checksum warning')
+
+        dobj_path =  '/{0.zone}/home/{0.username}/verify_chksum.dat'.format(self.sess)
+        self.sess.data_objects.create(dobj_path)
+        try:
+            with self.sess.data_objects.open(dobj_path,'w') as f:
+                f.write(b'abcd')
+            checksum = self.sess.data_objects.chksum(dobj_path)
+            self.assertGreater(len(checksum),0)
+            r_err_stk = RErrorStack()
+            warning = None
+            try:
+                self.sess.data_objects.chksum(dobj_path, **{'r_error': r_err_stk, kw.VERIFY_CHKSUM_KW:''})
+            except Server_Checksum_Warning as exc_:
+                warning = exc_
+            # There's one replica and it has a checksum, so expect no errors or hints from error stack.
+            self.assertIsNone(warning)
+            self.assertEqual(0, len(r_err_stk))
+        finally:
+            self.sess.data_objects.unlink(dobj_path, force = True)
+
+    def test_verify_chksum__282_287( self ):
+
+        if self.sess.server_version < (4, 2, 11):
+            self.skipTest('iRODS servers < 4.2.11 do not raise a checksum warning')
+
+        with self.create_simple_resc() as R, self.create_simple_resc() as R2, NamedTemporaryFile(mode = 'wb') as f:
+            f.write(b'abcxyz\n')
+            f.flush()
+            coll_path = '/{0.zone}/home/{0.username}' .format(self.sess)
+            dobj_path = coll_path + '/' + os.path.basename(f.name)
+            Data = self.sess.data_objects
+            r_err_stk = RErrorStack()
+            try:
+                demoR = self.sess.resources.get('demoResc').name  # Assert presence of demoResc and
+                Data.put( f.name, dobj_path )                     # Establish three replicas of data object.
+                Data.replicate( dobj_path, resource = R)
+                Data.replicate( dobj_path, resource = R2)
+                my_object = Data.get(dobj_path)
+
+                my_object.chksum( **{kw.RESC_NAME_KW:demoR} )  # Make sure demoResc has the only checksummed replica of the three.
+                my_object = Data.get(dobj_path)                # Refresh replica list to get checksum(s).
+
+                Baseline_repls_without_checksum = set( r.number for r in my_object.replicas if not r.checksum )
+
+                warn_exception = None
+                try:
+                    my_object.chksum( r_error = r_err_stk, **{kw.VERIFY_CHKSUM_KW:''} )   # Verify checksums without auto-vivify.
+                except Server_Checksum_Warning as warn:
+                    warn_exception = warn
+
+                self.assertIsNotNone(warn_exception, msg = "Expected exception of type [Server_Checksum_Warning] was not received.")
+
+                # -- Make sure integer codes are properly reflected for checksum warnings.
+                self.assertEqual (2, len([e for e in r_err_stk if e.status_ == ex.rounded_code('CAT_NO_CHECKSUM_FOR_REPLICA')]))
+
+                NO_CHECKSUM_MESSAGE_PATTERN = re.compile( 'No\s+Checksum\s+Available.+\s+Replica\s\[(\d+)\]', re.IGNORECASE)
+
+                Reported_repls_without_checksum = set( int(match.group(1)) for match in [ NO_CHECKSUM_MESSAGE_PATTERN.search(e.raw_msg_)
+                                                                                          for e in r_err_stk ]
+                                                       if match is not None )
+
+                # Ensure that VERIFY_CHKSUM_KW reported all replicas lacking a checksum
+                self.assertEqual (Reported_repls_without_checksum,
+                                  Baseline_repls_without_checksum)
+            finally:
+                if Data.exists (dobj_path):
+                    Data.unlink (dobj_path, force = True)
 
 
     def test_compute_chksum( self ):
@@ -663,7 +850,6 @@ class TestDataObjOps(unittest.TestCase):
 
         # delete second resource
         self.sess.resources.remove(resc_name)
-
 
     def test_replica_number(self):
         if self.sess.server_version < (4, 0, 0):
@@ -1280,6 +1466,53 @@ class TestDataObjOps(unittest.TestCase):
         # delete file
         os.remove(test_file)
 
+
+    def test_object_names_with_nonprintable_chars (self):
+        if  (4,2,8) < self.sess.server_version < (4,2,11):
+            self.skipTest('4.2.9 and 4.2.10 are known to fail as apostrophes in object names are problematic')
+        test_dir = helpers.irods_shared_tmp_dir()
+        loc_server = self.sess.host in ('localhost', socket.gethostname())
+        if not(test_dir) and not(loc_server):
+            self.skipTest('data_obj register requires server has access to local or shared files')
+        temp_names = []
+        vault = ''
+        try:
+            resc_name = 'regWithNonPrintableNamesResc'
+            vault = make_ufs_resc_in_tmpdir(self.sess, resc_name, allow_local = loc_server)
+            def enter_file_into_irods( session, filename, **kw_opt ):
+                ET( XML_Parser_Type.QUASI_XML, session.server_version)
+                basename = os.path.basename(filename)
+                logical_path = '/{0.zone}/home/{0.username}/{basename}'.format(session,**locals())
+                bound_method = getattr(session.data_objects, kw_opt['method'])
+                bound_method( os.path.abspath(filename), logical_path, **kw_opt['options'] )
+                d = session.data_objects.get(logical_path)
+                Path_Good = (d.path == logical_path)
+                session.data_objects.unlink( logical_path, force = True )
+                session.cleanup()
+                return Path_Good
+            futr = []
+            threadpool = concurrent.futures.ThreadPoolExecutor()
+            fname = re.sub( r'[/]', '',
+                            ''.join(map(chr,range(1,128))) )
+            for opts in [
+                    {'method':'put',     'options':{}},
+                    {'method':'register','options':{kw.RESC_NAME_KW: resc_name}, 'dir':(test_dir or None)}
+                ]:
+                with NamedTemporaryFile(prefix=opts["method"]+"_"+fname, dir=opts.get("dir"), delete=False) as f:
+                    f.write(b'hello')
+                    temp_names += [f.name]
+                ses = helpers.make_session()
+                futr.append( threadpool.submit( enter_file_into_irods, ses, f.name, **opts ))
+            results = [ f.result() for f in futr ]
+            self.assertEqual (results, [True, True])
+        finally:
+            for name in temp_names:
+                if os.path.exists(name):
+                    os.unlink(name)
+            if vault:
+                self.sess.resources.remove( resc_name )
+        self.assertIs( default_XML_parser(), current_XML_parser() )
+
     def test_register_with_xml_special_chars(self):
         test_dir = helpers.irods_shared_tmp_dir()
         loc_server = self.sess.host in ('localhost', socket.gethostname())
@@ -1291,25 +1524,28 @@ class TestDataObjOps(unittest.TestCase):
         collection = self.coll.path
         filename = '''aaa'"<&test&>"'_file'''
         test_path = make_ufs_resc_in_tmpdir(self.sess, resc_name, allow_local = loc_server)
-        test_file = os.path.join(test_path, filename)
-        obj_path = '{collection}/{filename}'.format(**locals())
+        try:
+            test_file = os.path.join(test_path, filename)
+            obj_path = '{collection}/{filename}'.format(**locals())
 
-        # make random 4K binary file
-        with open(test_file, 'wb') as f:
-            f.write(os.urandom(1024 * 4))
+            # make random 4K binary file
+            with open(test_file, 'wb') as f:
+                f.write(os.urandom(1024 * 4))
 
-        # register file in test collection
-        self.sess.data_objects.register(test_file, obj_path, **{kw.RESC_NAME_KW: resc_name})
+            # register file in test collection
+            self.sess.data_objects.register(test_file, obj_path, **{kw.RESC_NAME_KW: resc_name})
 
-        # confirm object presence
-        obj = self.sess.data_objects.get(obj_path)
+            # confirm object presence
+            obj = self.sess.data_objects.get(obj_path)
 
-        # in a real use case we would likely
-        # want to leave the physical file on disk
-        obj.unregister()
-
-        # delete file
-        os.remove(test_file)
+        finally:
+            # in a real use case we would likely
+            # want to leave the physical file on disk
+            obj.unregister()
+            # delete file
+            os.remove(test_file)
+            # delete resource
+            self.sess.resources.get(resc_name).remove()
 
 
 if __name__ == '__main__':

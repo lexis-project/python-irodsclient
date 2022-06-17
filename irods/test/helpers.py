@@ -12,15 +12,18 @@ import inspect
 import threading
 import random
 import datetime
+import json
 from pwd import getpwnam
 from irods.session import iRODSSession
 from irods.message import iRODSMessage
+from irods.password_obfuscation import encode
 from six.moves import range
 
 
 def my_function_name():
     """Returns the name of the calling function or method"""
     return inspect.getframeinfo(inspect.currentframe().f_back).function
+
 
 _thrlocal = threading.local()
 
@@ -71,10 +74,23 @@ def get_register_resource(session):
     return Reg_Resc_Name
 
 
+def make_environment_and_auth_files( dir_, **params ):
+    if not os.path.exists(dir_): os.mkdir(dir_)
+    def recast(k):
+        return 'irods_' + k + ('_name' if k in ('user','zone') else '')
+    config = os.path.join(dir_,'irods_environment.json')
+    with open(config,'w') as f1:
+        json.dump({recast(k):v for k,v in params.items() if k != 'password'},f1,indent=4)
+    auth = os.path.join(dir_,'.irodsA')
+    with open(auth,'w') as f2:
+        f2.write(encode(params['password']))
+    os.chmod(auth,0o600)
+    return (config, auth)
+
 
 def make_session(**kwargs):
     try:
-        env_file = kwargs['irods_env_file']
+        env_file = kwargs.pop('irods_env_file')
     except KeyError:
         try:
             env_file = os.environ['IRODS_ENVIRONMENT_FILE']
@@ -87,7 +103,11 @@ def make_session(**kwargs):
     except KeyError:
         uid = None
 
-    return iRODSSession(irods_authentication_uid=uid, irods_env_file=env_file)
+    return iRODSSession( irods_authentication_uid = uid, irods_env_file = env_file, **kwargs )
+
+
+def home_collection(session):
+    return "/{0.zone}/home/{0.username}".format(session)
 
 
 def make_object(session, path, content=None, **options):

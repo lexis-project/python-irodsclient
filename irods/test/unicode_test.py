@@ -6,8 +6,10 @@ import sys
 import unittest
 from irods.models import Collection, DataObject
 import xml.etree.ElementTree as ET
+from irods.message import (ET as ET_set, XML_Parser_Type, current_XML_parser, default_XML_parser)
 import logging
 import irods.test.helpers as helpers
+from six import PY3
 
 logger = logging.getLogger(__name__)
 
@@ -70,21 +72,43 @@ class TestUnicodeNames(unittest.TestCase):
         self.coll.remove(recurse=True, force=True)
         self.sess.cleanup()
 
+    def test_object_name_containing_unicode__318(self):
+        dataname = u"réprouvé"
+        homepath = helpers.home_collection( self.sess )
+        try:
+            ET_set( XML_Parser_Type.QUASI_XML, self.sess.server_version )
+            path = homepath + "/" + dataname
+            self.sess.data_objects.create( path )
+        finally:
+            ET_set( None )
+            self.sess.data_objects.unlink (path, force = True)
+
+        # assert successful switch back to global default
+        self.assertIs( current_XML_parser(), default_XML_parser() )
+
     def test_files(self):
         # Query for all files in test collection
         query = self.sess.query(DataObject.name, Collection.name).filter(
             Collection.name == self.coll_path)
 
+        # Python2 compatibility note:  In keeping with the principle of least surprise, we now ensure
+        # queries return values of 'str' type in Python2.  When and if these quantities have a possibility
+        # of representing unicode quantities, they can then go through a decode stage.
+
+        encode_unless_PY3 = (lambda x:x) if PY3 else (lambda x:x.encode('utf8'))
+        decode_unless_PY3 = (lambda x:x) if PY3 else (lambda x:x.decode('utf8'))
+
         for result in query:
             # check that we got back one of our original names
-            assert result[DataObject.name] in self.names
+            assert result[DataObject.name] in ( [encode_unless_PY3(n) for n in self.names] )
 
             # fyi
-            logger.info(
-                u"{0}/{1}".format(result[Collection.name], result[DataObject.name]))
+            logger.info( u"{0}/{1}".format( decode_unless_PY3(result[Collection.name]),
+                                            decode_unless_PY3(result[DataObject.name]) )
+                       )
 
             # remove from set
-            self.names.remove(result[DataObject.name])
+            self.names.remove(decode_unless_PY3(result[DataObject.name]))
 
         # make sure we got all of them
         self.assertEqual(0, len(self.names))

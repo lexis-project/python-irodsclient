@@ -9,13 +9,22 @@ import ssl
 import hashlib
 import datetime
 import irods.password_obfuscation as obf
+from irods import MAX_NAME_LEN
 from ast import literal_eval as safe_eval
 
 from irods.message import (
     iRODSMessage, StartupPack, AuthResponse, AuthChallenge, AuthPluginOut,
     OpenedDataObjRequest, FileSeekResponse, StringStringMap, VersionResponse,
     OpenIDAuthMessage, ClientServerNegotiation, Error, PluginAuthMessage, GetTempPasswordOut)
-from irods.exception import get_exception_by_code, NetworkException
+from irods.exception import (get_exception_by_code, NetworkException, nominal_code)
+from irods.message import (PamAuthRequest, PamAuthRequestOut)
+
+
+ALLOW_PAM_LONG_TOKENS = True      # True to fix [#279]
+# Message to be logged when the connection
+# destructor is called. Used in a unit test
+DESTRUCTOR_MSG = "connection __del__() called"
+
 from irods import (
     MAX_PASSWORD_LENGTH, RESPONSE_LEN,
     AUTH_SCHEME_KEY, AUTH_USER_KEY, AUTH_PWD_KEY, AUTH_TTL_KEY,
@@ -93,8 +102,8 @@ class Connection(object):
         return self._client_signature
 
     def __del__(self):
-        if self.socket and getattr(self,"_disconnected",False):
-            self.disconnect()
+        self.disconnect()
+        logger.debug(DESTRUCTOR_MSG)
 
     def send(self, message):
         string = message.pack()
@@ -111,37 +120,36 @@ class Connection(object):
             self.release(True)
             raise NetworkException("Unable to send message")
 
-    def recv(self):
+    def recv(self, into_buffer = None
+                 , return_message = ()
+                 , acceptable_errors = ()):
+        acceptable_codes = set(nominal_code(e) for e in acceptable_errors)
         try:
-            msg = iRODSMessage.recv(self.socket)
-        except socket.error:
+            if into_buffer is None:
+                msg = iRODSMessage.recv(self.socket)
+            else:
+                msg = iRODSMessage.recv_into(self.socket, into_buffer)
+        except (socket.error, socket.timeout) as e:
+            # If _recv_message_in_len() fails in recv() or recv_into(),
+            # it will throw a socket.error exception. The exception is
+            # caught here, a critical message is logged, and is wrapped
+            # in a NetworkException with a more user friendly message
+            logger.critical(e)
             logger.error("Could not receive server response")
             self.release(True)
             raise NetworkException("Could not receive server response")
+        if isinstance(return_message,list): return_message[:] = [msg]
         if msg.int_info < 0:
             try:
                 err_msg = iRODSMessage(msg=msg.error).get_main_message(Error).RErrMsg_PI[0].msg
             except TypeError:
-                raise get_exception_by_code(msg.int_info)
-            raise get_exception_by_code(msg.int_info, err_msg)
+                err_msg = None
+            if nominal_code(msg.int_info) not in acceptable_codes:
+                raise get_exception_by_code(msg.int_info, err_msg)
         return msg
 
-    def recv_into(self, buffer):
-        try:
-            msg = iRODSMessage.recv_into(self.socket, buffer)
-        except socket.error:
-            logger.error("Could not receive server response")
-            self.release(True)
-            raise NetworkException("Could not receive server response")
-
-        if msg.int_info < 0:
-            try:
-                err_msg = iRODSMessage(msg=msg.error).get_main_message(Error).RErrMsg_PI[0].msg
-            except TypeError:
-                raise get_exception_by_code(msg.int_info)
-            raise get_exception_by_code(msg.int_info, err_msg)
-
-        return msg
+    def recv_into(self, buffer, **options):
+        return self.recv( into_buffer = buffer, **options )
 
     def __enter__(self):
         return self
@@ -181,7 +189,13 @@ class Connection(object):
             context = self.account.ssl_context
         except AttributeError:
             CA_file = getattr(self.account, 'ssl_ca_certificate_file', None)
+            verify_server_mode = getattr(self.account,'ssl_verify_server', 'hostname')
+            if verify_server_mode == 'none':
+                CA_file = None
             context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=CA_file)
+            if CA_file is None:
+                context.check_hostname = False
+                context.verify_mode = 0  # VERIFY_NONE
 
         # Wrap socket with context
         wrapped_socket = context.wrap_socket(self.socket, server_hostname=host)
@@ -286,17 +300,24 @@ class Connection(object):
         return version_msg.get_main_message(VersionResponse)
 
     def disconnect(self):
-        disconnect_msg = iRODSMessage(msg_type='RODS_DISCONNECT')
-        self.send(disconnect_msg)
-        try:
-            # SSL shutdown handshake
-            self.socket = self.socket.unwrap()
-        except AttributeError:
-            pass
-        self.socket.shutdown(socket.SHUT_RDWR)
-        self.socket.close()
-        self.socket = None
-        self._disconnected = True
+        # Moved the conditions to call disconnect() inside the function.
+        # Added a new criteria for calling disconnect(); Only call
+        # disconnect() if fileno is not -1 (fileno -1 indicates the socket
+        # is already closed). This makes it safe to call disconnect multiple
+        # times on the same connection. The first call cleans up the resources
+        # and next calls are no-ops
+        if self.socket and getattr(self, "_disconnected", False) == False and self.socket.fileno() != -1:
+            disconnect_msg = iRODSMessage(msg_type='RODS_DISCONNECT')
+            self.send(disconnect_msg)
+            try:
+                # SSL shutdown handshake
+                self.socket = self.socket.unwrap()
+            except AttributeError:
+                pass
+            self.socket.shutdown(socket.SHUT_RDWR)
+            self.socket.close()
+            self.socket = None
+            self._disconnected = True
 
     def recvall(self, n):
         # Helper function to recv n bytes or return None if EOF is hit
@@ -401,7 +422,7 @@ class Connection(object):
             username=self.account.proxy_user + '#' + self.account.proxy_zone
         )
         gsi_request = iRODSMessage(
-            msg_type='RODS_API_REQ', int_info=704, msg=gsi_msg)
+            msg_type='RODS_API_REQ', int_info=api_number['AUTH_RESPONSE_AN'], msg=gsi_msg)
         self.send(gsi_request)
         self.recv()
         # auth_response = self.recv()
@@ -542,9 +563,11 @@ class Connection(object):
 
     def _login_pam(self):
 
+        time_to_live_in_seconds = 60
+
         ctx_user = '%s=%s' % (AUTH_USER_KEY, self.account.client_user)
         ctx_pwd = '%s=%s' % (AUTH_PWD_KEY, self.account.password)
-        ctx_ttl = '%s=%s' % (AUTH_TTL_KEY, "60")
+        ctx_ttl = '%s=%s' % (AUTH_TTL_KEY, str(time_to_live_in_seconds))
 
         ctx = ";".join([ctx_user, ctx_pwd, ctx_ttl])
 
@@ -552,23 +575,34 @@ class Connection(object):
             if getattr(self,'DISALLOWING_PAM_PLAINTEXT',True):
                 raise PlainTextPAMPasswordError
 
-        message_body = PluginAuthMessage(
-            auth_scheme_=PAM_AUTH_SCHEME,
-            context_=ctx
-        )
+        Pam_Long_Tokens = (ALLOW_PAM_LONG_TOKENS and (len(ctx) >= MAX_NAME_LEN))
+
+        if Pam_Long_Tokens:
+
+            message_body = PamAuthRequest(
+                pamUser=self.account.client_user,
+                pamPassword=self.account.password,
+                timeToLive=time_to_live_in_seconds)
+        else:
+
+            message_body = PluginAuthMessage(
+                auth_scheme_ = PAM_AUTH_SCHEME,
+                context_ = ctx)
 
         auth_req = iRODSMessage(
             msg_type='RODS_API_REQ',
             msg=message_body,
-            # int_info=725
-            int_info=1201
+            int_info=(725 if Pam_Long_Tokens else 1201)
         )
 
         self.send(auth_req)
         # Getting the new password
         output_message = self.recv()
 
-        auth_out = output_message.get_main_message(AuthPluginOut)
+        Pam_Response_Class = (PamAuthRequestOut if Pam_Long_Tokens
+                         else AuthPluginOut)
+
+        auth_out = output_message.get_main_message( Pam_Response_Class )
 
         self.disconnect()
         self._connect()
@@ -613,7 +647,7 @@ class Connection(object):
 
         # Default case, PAM login will send a new password
         if password is None:
-            password = self.account.password
+            password = self.account.password or ''
 
         # authenticate
         auth_req = iRODSMessage(msg_type='RODS_API_REQ', int_info=703)
@@ -655,7 +689,7 @@ class Connection(object):
         pwd_msg = AuthResponse(
             response=encoded_pwd, username=self.account.proxy_user)
         pwd_request = iRODSMessage(
-            msg_type='RODS_API_REQ', int_info=704, msg=pwd_msg)
+            msg_type='RODS_API_REQ', int_info=api_number['AUTH_RESPONSE_AN'], msg=pwd_msg)
         self.send(pwd_request)
         self.recv()
 

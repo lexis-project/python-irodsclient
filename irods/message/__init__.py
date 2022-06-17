@@ -1,14 +1,143 @@
 """Define objects related to communication with iRODS server API endpoints."""
 
+import sys
 import struct
 import logging
 import socket
 import json
-import xml.etree.ElementTree as ET
+from six.moves import builtins
+import irods.exception as ex
+import xml.etree.ElementTree as ET_xml
+import defusedxml.ElementTree as ET_secure_xml
+from . import quasixml as ET_quasi_xml
+from collections import namedtuple
+import os
+import fcntl
+import ast
+import threading
 from irods.message.message import Message
 from irods.message.property import (BinaryProperty, StringProperty,
                                     IntegerProperty, LongProperty, ArrayProperty,
                                     SubmessageProperty)
+
+_TUPLE_LIKE_TYPES = (tuple, list)
+
+def _qxml_server_version( var ):
+    val = os.environ.get( var, '()' )
+    vsn = (val and ast.literal_eval( val ))
+    if not isinstance( vsn, _TUPLE_LIKE_TYPES ): return None
+    return tuple( vsn )
+
+if sys.version_info >= (3,):
+    import enum
+    class XML_Parser_Type(enum.Enum):
+        _invalid = 0
+        STANDARD_XML = 1
+        QUASI_XML = 2
+        SECURE_XML = 3
+else:
+    class MyIntEnum(int):
+        """An integer enum class suited to the purpose. A shim until we get rid of Python2."""
+        def __init__(self,i):
+            """Initialize based on an integer or another instance."""
+            super(MyIntEnum,self).__init__()
+            try:self.i = i._value()
+            except AttributeError:
+                self.i = i
+        def _value(self): return self.i
+        @builtins.property
+        def value(self): return self._value()
+
+    class XML_Parser_Type(MyIntEnum):
+        """An enum specifying which XML parser is active."""
+        pass
+    XML_Parser_Type.STANDARD_XML = XML_Parser_Type (1)
+    XML_Parser_Type.QUASI_XML = XML_Parser_Type (2)
+    XML_Parser_Type.SECURE_XML = XML_Parser_Type (3)
+
+# We maintain values on a per-thread basis of:
+#   - the server version with which we're communicating
+#   - which of the choices of parser (STANDARD_XML or QUASI_XML) we're using
+
+_thrlocal = threading.local()
+
+# The packStruct message parser defaults to STANDARD_XML but we can override it by setting the
+# environment variable PYTHON_IRODSCLIENT_DEFAULT_XML to either 'SECURE_XML' or 'QUASI_XML'.
+# If QUASI_XML is selected, the environment variable PYTHON_IRODSCLIENT_QUASI_XML_SERVER_VERSION
+# may also be set to a tuple "X,Y,Z" to inform the client of the connected iRODS server version.
+# If we set a value for the version, it can be either:
+#    * 4,2,8 to work with that server version and older ones which incorrectly encoded back-ticks as '&apos;'
+#    * an empty tuple "()" or something >= 4,2,9 to work with newer servers to allow a flexible character
+#      set within iRODS protocol.
+
+class BadXMLSpec(RuntimeError): pass
+
+_Quasi_Xml_Server_Version = _qxml_server_version('PYTHON_IRODSCLIENT_QUASI_XML_SERVER_VERSION')
+if _Quasi_Xml_Server_Version is None:  # unspecified in environment yields empty tuple ()
+    raise BadXMLSpec('Must properly specify a server version to use QUASI_XML')
+
+_XML_strings = { k:v for k,v in vars(XML_Parser_Type).items() if k.endswith('_XML')}
+
+
+_default_XML = os.environ.get('PYTHON_IRODSCLIENT_DEFAULT_XML','')
+if not _default_XML:
+    _default_XML = XML_Parser_Type.STANDARD_XML
+else:
+    try:
+        _default_XML = _XML_strings[_default_XML]
+    except KeyError:
+        raise BadXMLSpec('XML parser type not recognized')
+
+
+def current_XML_parser(get_module = False):
+    d = getattr(_thrlocal,'xml_type',_default_XML)
+    return d if not get_module else _XML_parsers[d]
+
+def default_XML_parser(get_module = False):
+    d = _default_XML
+    return d if not get_module else _XML_parsers[d]
+
+_XML_parsers = {
+    XML_Parser_Type.STANDARD_XML : ET_xml,
+    XML_Parser_Type.QUASI_XML : ET_quasi_xml,
+    XML_Parser_Type.SECURE_XML : ET_secure_xml
+}
+
+
+def XML_entities_active():
+    Server = getattr(_thrlocal,'irods_server_version',_Quasi_Xml_Server_Version)
+    return [ ('&', '&amp;'), # note: order matters. & must be encoded first.
+             ('<', '&lt;'),
+             ('>', '&gt;'),
+             ('"', '&quot;'),
+             ("'" if not(Server) or Server >= (4,2,9) else '`',
+               '&apos;') # https://github.com/irods/irods/issues/4132
+            ]
+
+
+# ET() [no-args form] will just fetch the current thread's XML parser settings
+
+def ET(xml_type = 0, server_version = None):
+    """
+    Return the module used to parse XML from iRODS protocol messages text.
+
+    May also be used to specify the following attributes of the currently running thread:
+
+    `xml_type', if given, should be 1 for STANDARD_XML or 2 for QUASI_XML.
+      * QUASI_XML is custom parser designed to be more compatible with the use of
+        non-printable characters in object names.
+      * STANDARD_XML uses the standard module, xml.etree.ElementTree.
+
+    `server_version', if given, should be a list or tuple specifying the version of the connected iRODS server.
+
+    """
+    if xml_type is not 0:
+        _thrlocal.xml_type = default_XML_parser() if xml_type in (None, XML_Parser_Type(0)) \
+                        else XML_Parser_Type(xml_type)
+    if isinstance(server_version, _TUPLE_LIKE_TYPES):
+        _thrlocal.irods_server_version = tuple(server_version)  #  A default server version for Quasi-XML parsing is set (from the environment) and
+    return _XML_parsers[current_XML_parser()]                   #  applies to all threads in which ET() has not been called to update the value.
+
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +151,21 @@ except NameError:
     UNICODE = str
 
 
+
+# Necessary for older python (<3.7):
+_socket_is_blocking = (lambda self: 0 == fcntl.fcntl(self.fileno(), fcntl.F_GETFL) & os.O_NONBLOCK)
+
 def _recv_message_in_len(sock, size):
     size_left = size
     retbuf = None
+
+    # Get socket properties for debug and exception messages.
+    is_blocking = _socket_is_blocking(sock)
+    timeout = sock.gettimeout()
+
+    logger.debug('is_blocking: %s',is_blocking)
+    logger.debug('timeout: %s',timeout)
+
     while size_left > 0:
         try:
             buf = sock.recv(size_left, socket.MSG_WAITALL)
@@ -35,11 +176,26 @@ def _recv_message_in_len(sock, size):
             if getattr(e, 'winerror', 0) != 10045:
                 raise
             buf = sock.recv(size_left)
+
+        # This prevents an infinite loop. If the call to recv()
+        # returns an empty buffer, break out of the loop.
+        if len(buf) == 0:
+            break
         size_left -= len(buf)
         if retbuf is None:
             retbuf = buf
         else:
             retbuf += buf
+
+    # This method is supposed to read and return 'size'
+    # bytes from the socket. If it reads no bytes (retbuf
+    # will be None), or if it reads less number of bytes
+    # than 'size', throw a socket.error exception
+    if retbuf is None or len(retbuf) != size:
+        retbuf_size = len(retbuf) if retbuf is not None else 0
+        msg = 'Read {} bytes from socket instead of expected {} bytes'.format(retbuf_size, size)
+        raise socket.error(msg)
+
     return retbuf
 
 
@@ -73,6 +229,16 @@ class JSON_Binary_Response(BinBytesBuf):
 
 class iRODSMessage(object):
 
+    class ResponseNotParseable(Exception):
+
+        """
+        Raised by get_main_message(ResponseClass) to indicate a server response
+        wraps a msg string that is the `None' object rather than an XML String.
+        (Not raised for the ResponseClass is irods.message.Error; see source of
+        get_main_message for further detail.)
+        """
+        pass
+
     def __init__(self, msg_type=b'', msg=None, error=b'', bs=b'', int_info=0):
         self.msg_type = msg_type
         self.msg = msg
@@ -81,7 +247,7 @@ class iRODSMessage(object):
         self.int_info = int_info
 
     def get_json_encoded_struct (self):
-        Xml = ET.fromstring(self.msg.replace(b'\0',b''))
+        Xml = ET().fromstring(self.msg.replace(b'\0',b''))
         json_str = Xml.find('buf').text
         if Xml.tag == 'BinBytesBuf_PI':
             mybin = JSON_Binary_Response()
@@ -97,7 +263,7 @@ class iRODSMessage(object):
         # rsp_header = sock.recv(rsp_header_size, socket.MSG_WAITALL)
         rsp_header = _recv_message_in_len(sock, rsp_header_size)
 
-        xml_root = ET.fromstring(rsp_header)
+        xml_root = ET().fromstring(rsp_header)
         msg_type = xml_root.find('type').text
         msg_len = int(xml_root.find('msgLen').text)
         err_len = int(xml_root.find('errorLen').text)
@@ -124,7 +290,7 @@ class iRODSMessage(object):
         rsp_header_size = struct.unpack(">i", rsp_header_size)[0]
         rsp_header = _recv_message_in_len(sock, rsp_header_size)
 
-        xml_root = ET.fromstring(rsp_header)
+        xml_root = ET().fromstring(rsp_header)
         msg_type = xml_root.find('type').text
         msg_len = int(xml_root.find('msgLen').text)
         err_len = int(xml_root.find('errorLen').text)
@@ -186,10 +352,19 @@ class iRODSMessage(object):
         return packed_header + main_msg + self.error + self.bs
 
 
-    def get_main_message(self, cls):
+    def get_main_message(self, cls, r_error = None):
         msg = cls()
-        logger.debug(self.msg)
-        msg.unpack(ET.fromstring(self.msg))
+        logger.debug('Attempt to parse server response [%r] as class [%r].',self.msg,cls)
+        if self.error and isinstance(r_error, RErrorStack):
+            r_error.fill( iRODSMessage(msg=self.error).get_main_message(Error) )
+        if self.msg is None:
+            if cls is not Error:
+                # - For dedicated API response classes being built from server response, allow catching
+                #   of the exception.  However, let iRODS errors such as CAT_NO_ROWS_FOUND to filter
+                #   through as usual for express reporting by instances of irods.connection.Connection .
+                message = "Server response was {self.msg} while parsing as [{cls}]".format(**locals())
+                raise self.ResponseNotParseable( message )
+        msg.unpack(ET().fromstring(self.msg))
         return msg
 
 
@@ -249,6 +424,25 @@ class AuthPluginOut(Message):
     _name = 'authPlugReqOut_PI'
     result_ = StringProperty()
     # result_ = BinaryProperty(16)
+
+
+# The following PamAuthRequest* classes correspond to older, less generic
+# PAM auth api in iRODS, but one which allowed longer password tokens.
+# They are contributed by Rick van de Hoef at Utrecht Univ, c. June 2021:
+
+class PamAuthRequest(Message):
+    _name = 'pamAuthRequestInp_PI'
+    pamUser = StringProperty()
+    pamPassword = StringProperty()
+    timeToLive = IntegerProperty()
+
+class PamAuthRequestOut(Message):
+    _name = 'pamAuthRequestOut_PI'
+    irodsPamPassword = StringProperty()
+    @builtins.property
+    def result_(self): return self.irodsPamPassword
+
+
 
 # define InxIvalPair_PI "int iiLen; int *inx(iiLen); int *ivalue(iiLen);"
 
@@ -540,14 +734,14 @@ class VersionResponse(Message):
     cookie = IntegerProperty()
 
 
-# define generalAdminInp_PI "str *arg0; str *arg1; str *arg2; str *arg3;
-# str *arg4; str *arg5; str *arg6; str *arg7;  str *arg8;  str *arg9;"
+class _admin_request_base(Message):
 
-class GeneralAdminRequest(Message):
-    _name = 'generalAdminInp_PI'
+    _name = None
 
     def __init__(self, *args):
-        super(GeneralAdminRequest, self).__init__()
+        if self.__class__._name is None:
+            raise NotImplementedError
+        super(_admin_request_base, self).__init__()
         for i in range(10):
             if i < len(args) and args[i]:
                 setattr(self, 'arg{0}'.format(i), args[i])
@@ -566,6 +760,20 @@ class GeneralAdminRequest(Message):
     arg9 = StringProperty()
 
 
+# define generalAdminInp_PI "str *arg0; str *arg1; str *arg2; str *arg3;
+# str *arg4; str *arg5; str *arg6; str *arg7;  str *arg8;  str *arg9;"
+
+class GeneralAdminRequest(_admin_request_base):
+    _name = 'generalAdminInp_PI'
+
+
+# define userAdminInp_PI "str *arg0; str *arg1; str *arg2; str *arg3;
+# str *arg4; str *arg5; str *arg6; str *arg7;  str *arg8;  str *arg9;"
+
+class UserAdminRequest(_admin_request_base):
+    _name = 'userAdminInp_PI'
+
+
 class GetTempPasswordForOtherRequest(Message):
     _name = 'getTempPasswordForOtherInp_PI'
     targetUser = StringProperty()
@@ -582,25 +790,42 @@ class GetTempPasswordOut(Message):
     stringToHashWith = StringProperty()
 
 
+#in iRODS <= 4.2.10:
 #define ticketAdminInp_PI "str *arg1; str *arg2; str *arg3; str *arg4; str *arg5; str *arg6;"
 
-class TicketAdminRequest(Message):
-    _name = 'ticketAdminInp_PI'
+#in iRODS <= 4.2.11:
+#define ticketAdminInp_PI "str *arg1; str *arg2; str *arg3; str *arg4; str *arg5; str *arg6; struct KeyValPair_PI;"
 
-    def __init__(self, *args):
-        super(TicketAdminRequest, self).__init__()
-        for i in range(6):
-            if i < len(args) and args[i]:
-                setattr(self, 'arg{0}'.format(i+1), str(args[i]))
-            else:
-                setattr(self, 'arg{0}'.format(i+1), "")
+def TicketAdminRequest(session):
 
-    arg1 = StringProperty()
-    arg2 = StringProperty()
-    arg3 = StringProperty()
-    arg4 = StringProperty()
-    arg5 = StringProperty()
-    arg6 = StringProperty()
+    # class is different depending on server version
+
+    SERVER_REQUIRES_KEYVAL_PAIRS = (session.server_version >= (4,2,11))
+
+    class TicketAdminRequest_(Message):
+        _name = 'ticketAdminInp_PI'
+
+        def __init__(self, *args,**ticketOpts):
+            super(TicketAdminRequest_, self).__init__()
+            for i in range(6):
+                if i < len(args) and args[i]:
+                    setattr(self, 'arg{0}'.format(i+1), str(args[i]))
+                else:
+                    setattr(self, 'arg{0}'.format(i+1), "")
+            if SERVER_REQUIRES_KEYVAL_PAIRS:
+                self.KeyValPair_PI = StringStringMap(ticketOpts)
+
+        arg1 = StringProperty()
+        arg2 = StringProperty()
+        arg3 = StringProperty()
+        arg4 = StringProperty()
+        arg5 = StringProperty()
+        arg6 = StringProperty()
+
+        if SERVER_REQUIRES_KEYVAL_PAIRS:
+            KeyValPair_PI = SubmessageProperty(StringStringMap)
+
+    return TicketAdminRequest_
 
 
 #define specificQueryInp_PI "str *sql; str *arg1; str *arg2; str *arg3; str *arg4; str *arg5; str *arg6; str *arg7; str *arg8; str *arg9; str *arg10; int maxRows; int continueInx; int rowOffset; int options; struct KeyValPair_PI;"
@@ -778,6 +1003,85 @@ class ModDataObjMeta(Message):
     _name = "ModDataObjMeta_PI"
     dataObjInfo = SubmessageProperty(DataObjInfo)
     regParam = SubmessageProperty(StringStringMap)
+
+
+#  -- A tuple-descended class which facilitates filling in a
+#     quasi-RError stack from a JSON formatted list.
+
+_Server_Status_Message = namedtuple('server_status_msg',('msg','status'))
+
+
+class RErrorStack(list):
+
+    """A list of returned RErrors."""
+
+    def __init__(self,Err = None):
+        """Initialize from the `errors' member of an API return message."""
+        super(RErrorStack,self).__init__() # 'list' class initialization
+        self.fill(Err)
+
+    def fill(self,Err = None):
+
+        # first, we try to parse from a JSON list, as this is how message and status return the Data.chksum call.
+        if isinstance (Err, (tuple,list)):
+            self[:] = [ RError( _Server_Status_Message( msg = elem["message"],
+                                                        status = elem["error_code"] )
+                               ) for elem in Err
+                       ]
+            return
+
+        # next, we try to parse from a a response message - eg. as returned by the Rule.execute API call when a rule fails.
+        if Err is not None:
+            self[:] = [ RError(Err.RErrMsg_PI[i]) for i in range(Err.count) ]
+
+
+class RError(object):
+
+    """One of a list of RError messages potentially returned to the client
+       from an iRODS API call.  """
+
+    Encoding = 'utf-8'
+
+    def __init__(self,entry):
+        """Initialize from one member of the RErrMsg_PI array."""
+        super(RError,self).__init__()
+        self.raw_msg_ = entry.msg
+        self.status_ = entry.status
+
+
+    @builtins.property
+    def message(self): #return self.raw_msg_.decode(self.Encoding)
+        msg_ = self.raw_msg_
+        if type(msg_) is UNICODE:
+            return msg_
+        elif type(msg_) is bytes:
+            return msg_.decode(self.Encoding)
+        else:
+            raise RuntimeError('bad msg type in',msg_)
+
+    @builtins.property
+    def status(self): return int(self.status_)
+
+
+    @builtins.property
+    def status_str(self):
+        """Retrieve the IRODS error identifier."""
+        return ex.get_exception_class_by_code( self.status, name_only=True )
+
+
+    def __str__(self):
+        """Retrieve the error message text."""
+        return self.message
+
+    def __int__(self):
+        """Retrieve integer error code."""
+        return self.status
+
+    def __repr__(self):
+        """Show both the message and iRODS error type (both integer and human-readable)."""
+        return "{self.__class__.__name__}"\
+               "<message = {self.message!r}, status = {self.status} {self.status_str}>".format(**locals())
+
 
 #define RErrMsg_PI "int status; str msg[ERR_MSG_LEN];"
 

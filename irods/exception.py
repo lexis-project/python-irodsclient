@@ -4,6 +4,7 @@
 
 from __future__ import absolute_import
 import six
+import numbers
 
 
 class PycommandsException(Exception):
@@ -70,8 +71,47 @@ class iRODSException(six.with_metaclass(iRODSExceptionMeta, Exception)):
     pass
 
 
-def get_exception_by_code(code, message=None):
-    return iRODSExceptionMeta.codes[code](message)
+def nominal_code( the_code, THRESHOLD = 1000 ):
+    nominal = []
+    c = rounded_code( the_code , nominal_int_repo = nominal )
+    negated = -abs(nominal[0])
+    return c if (negated <= -abs(THRESHOLD)) else negated  # produce a negative for nonzero integer input
+
+def rounded_code( the_code , nominal_int_repo = () ):
+    nom_err = None
+    try:
+        if isinstance(the_code,type) and \
+           issubclass(the_code, iRODSException): the_code = getattr( the_code, 'code', the_code )
+        if isinstance(the_code,str):
+            nom_err = globals()[the_code].code
+            return nom_err
+        elif isinstance(the_code,numbers.Integral):
+            nom_err = the_code
+            return 1000 * ((-abs(the_code) - 1) // 1000 + 1)
+        else:
+            message = 'Supplied code {the_code!r} must be integer or string'.format(**locals())
+            raise RuntimeError(message)
+    finally:
+        if nom_err is not None and isinstance(nominal_int_repo,list):
+            nominal_int_repo[:] = [nom_err]
+
+
+def get_exception_class_by_code(code, name_only=False):
+    rounded = rounded_code (code)  # rounded up to -1000 if code <= -1000
+    cls = iRODSExceptionMeta.codes.get( rounded )
+    return cls if not name_only \
+      else (cls.__name__ if cls is not None else 'Unknown_iRODS_error')
+
+
+def get_exception_by_code(code, message = None):
+    exc_class = iRODSExceptionMeta.codes[ rounded_code( code ) ]
+    exc_instance = exc_class( message )
+    exc_instance.code = code
+    return exc_instance
+
+
+class UnknowniRODSError(iRODSException):
+    code = 0  # covers rounded_code (errcode) if 0 > errcode > -1000
 
 
 class SystemException(iRODSException):
@@ -706,6 +746,18 @@ class NO_LOCAL_FILE_RSYNC_IN_MSI(UserInputException):
     code = -356000
 
 
+class OBJ_PATH_DOES_NOT_EXIST(iRODSException):
+    code = -358000
+
+
+class LOCKED_DATA_OBJECT_ACCESS(SystemException):
+    code = -406000
+
+
+class CHECK_VERIFICATION_RESULTS(SystemException):
+    code = -407000
+
+
 class FileDriverException(iRODSException):
     pass
 
@@ -1005,6 +1057,8 @@ class CAT_NO_ROWS_FOUND(CatalogLibraryException):
 class CATALOG_ALREADY_HAS_ITEM_BY_THAT_NAME(CatalogLibraryException):
     code = -809000
 
+class CAT_NO_CHECKSUM_FOR_REPLICA (CatalogLibraryException):
+    code = -862000
 
 class CAT_INVALID_RESOURCE_TYPE(CatalogLibraryException):
     code = -810000
@@ -1187,6 +1241,18 @@ class RDA_ACCESS_PROHIBITED(RDSException):
 
 class RDA_NAME_NOT_FOUND(RDSException):
     code = -889000
+
+
+class TicketException(CatalogLibraryException):
+    pass
+
+
+class CAT_TICKET_INVALID(TicketException):
+    code = -890000
+
+
+class CAT_TICKET_EXPIRED(TicketException):
+    code = -891000
 
 
 class MiscException(iRODSException):
@@ -1503,6 +1569,10 @@ class DATAACCESS_EMPTY_IN_STRUCT_ERR(RuleEngineException):
 
 class DATAACCESSINX_EMPTY_IN_STRUCT_ERR(RuleEngineException):
     code = -1016000
+
+
+class RE_TYPE_ERROR(RuleEngineException):
+    code = -1230000
 
 
 class NO_RULE_FOUND_ERR(RuleEngineException):
@@ -1873,6 +1943,10 @@ class MSI_OPERATION_NOT_ALLOWED(RuleEngineException):
     code = -1110000
 
 
+class RULE_ENGINE_ERROR(RuleEngineException):
+    code = -1828000
+
+
 class PHPException(iRODSException):
     pass
 
@@ -1887,7 +1961,6 @@ class PHP_REQUEST_STARTUP_ERR(PHPException):
 
 class PHP_OPEN_SCRIPT_FILE_ERR(PHPException):
     code = -1602000
-
 
 class PAMException(iRODSException):
     pass

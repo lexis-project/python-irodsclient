@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 import os
 import json
+import errno
 import logging
 from irods.query import Query
 from irods.pool import Pool
@@ -18,12 +19,23 @@ from irods import NATIVE_AUTH_SCHEME, PAM_AUTH_SCHEME
 
 logger = logging.getLogger(__name__)
 
+class NonAnonymousLoginWithoutPassword(RuntimeError): pass
+
 class iRODSSession(object):
+
+    @property
+    def env_file (self):
+        return self._env_file
+
+    @property
+    def auth_file (self):
+        return self._auth_file
 
     def __init__(self, configure=True, **kwargs):
         self.pool = None
         self.numThreads = 0
-
+        self._env_file = ''
+        self._auth_file = ''
         self.do_configure = (kwargs if configure else {})
         self.__configured = None
         if configure:
@@ -46,7 +58,10 @@ class iRODSSession(object):
 
     def __del__(self):
         self.do_configure = {}
-        self.cleanup()
+        # If self.pool has been fully initialized (ie. no exception was
+        #   raised during __init__), then try to clean up.
+        if self.pool is not None:
+            self.cleanup()
 
     def cleanup(self):
         for conn in self.pool.active | self.pool.idle:
@@ -76,7 +91,7 @@ class iRODSSession(object):
             return iRODSAccount(**kwargs)
 
         # Get credentials from irods environment file
-        creds = self.get_irods_env(env_file)
+        creds = self.get_irods_env(env_file, session_ = self)
 
         # Update with new keywords arguments only
         creds.update((key, value) for key, value in kwargs.items() if key not in creds)
@@ -103,7 +118,13 @@ class iRODSSession(object):
         except KeyError:
             pass
 
-        creds['password'] = self.get_irods_password(**creds)
+        missing_file_path = []
+        error_args = []
+        pw = creds['password'] = self.get_irods_password(session_ = self, file_path_if_not_found = missing_file_path, **creds)
+        if not pw and creds.get('irods_user_name') != 'anonymous':
+            if missing_file_path:
+                error_args += ["Authentication file not found at {!r}".format(missing_file_path[0])]
+            raise NonAnonymousLoginWithoutPassword(*error_args)
 
         return iRODSAccount(**creds)
 
@@ -182,16 +203,20 @@ class iRODSSession(object):
             return os.path.expanduser('~/.irods/.irodsA')
 
     @staticmethod
-    def get_irods_env(env_file):
+    def get_irods_env(env_file, session_ = None):
         try:
             with open(env_file, 'rt') as f:
-                return json.load(f)
+                j = json.load(f)
+                if session_ is not None:
+                    session_._env_file = env_file
+                return j
         except IOError:
             logger.debug("Could not open file {}".format(env_file))
             return {}
 
     @staticmethod
-    def get_irods_password(**kwargs):
+    def get_irods_password(session_ = None, file_path_if_not_found = (), **kwargs):
+        path_memo  = []
         try:
             irods_auth_file = kwargs['irods_authentication_file']
         except KeyError:
@@ -202,8 +227,22 @@ class iRODSSession(object):
         except KeyError:
             uid = None
 
-        with open(irods_auth_file, 'r') as f:
-            return decode(f.read().rstrip('\n'), uid)
+        _retval = ''
+
+        try:
+            with open(irods_auth_file, 'r') as f:
+                _retval = decode(f.read().rstrip('\n'), uid)
+                return _retval
+        except IOError as exc:
+            if exc.errno != errno.ENOENT:
+                raise  # Auth file exists but can't be read
+            path_memo = [ irods_auth_file ]
+            return ''                           # No auth file (as with anonymous user)
+        finally:
+            if isinstance(file_path_if_not_found, list) and path_memo:
+                file_path_if_not_found[:] = path_memo
+            if session_ is not None and _retval:
+                session_._auth_file = irods_auth_file
 
     def get_connection_refresh_time(self, **kwargs):
         connection_refresh_time = -1

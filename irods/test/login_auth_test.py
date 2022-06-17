@@ -3,6 +3,7 @@ from __future__ import print_function
 from __future__ import absolute_import
 import os
 import sys
+import tempfile
 import unittest
 import textwrap
 import json
@@ -10,14 +11,20 @@ import shutil
 import ssl
 import irods.test.helpers as helpers
 from irods.connection import Connection
-from irods.session import iRODSSession
+from irods.session import iRODSSession, NonAnonymousLoginWithoutPassword
 from irods.rule import Rule
 from irods.models import User
 from socket import gethostname
 from irods.password_obfuscation import (encode as pw_encode)
 from irods.connection import PlainTextPAMPasswordError
+from irods.access import iRODSAccess
+import irods.exception as ex
 import contextlib
+import socket
 from re import compile as regex
+import gc
+import six
+
 try:
     from re import _pattern_type as regex_type
 except ImportError:
@@ -25,7 +32,8 @@ except ImportError:
 
 
 def json_file_update(fname,keys_to_delete=(),**kw):
-    j = json.load(open(fname,'r'))
+    with open(fname,'r') as f:
+        j = json.load(f)
     j.update(**kw)
     for k in keys_to_delete:
         if k in j: del j [k]
@@ -87,12 +95,29 @@ def pam_password_in_plaintext(allow=True):
 
 class TestLogins(unittest.TestCase):
     '''
-    This is due to be moved into Jenkins CI along core and other iRODS tests.
-    Until  then, for these tests to run successfully, we require:
-      1. First run ./setupssl.py (sets up SSL keys etc. in /etc/irods/ssl)
-      2. Add & override configuration entries in /var/lib/irods/irods_environment
+    Ideally, these tests should move into CI, but that would require the server
+    (currently a different node than the client) to have SSL certs created and
+    enabled.
+
+    Until then, we require these tests to be run manually on a server node,
+    with:
+
+        python -m unittest "irods.test.login_auth_test[.XX[.YY]]'
+
+    Additionally:
+
+      1. The PAM/SSL tests under the TestLogins class should be run on a
+         single-node iRODS system, by the service account user. This ensures
+         the /etc/irods directory is local and writable.
+
+      2. ./setupssl.py (sets up SSL keys etc. in /etc/irods/ssl) should be run
+         first to create (or overwrite, if appropriate) the /etc/irods/ssl directory
+         and its contents.
+
+      3. Must add & override configuration entries in /var/lib/irods/irods_environment
          Per https://slides.com/irods/ugm2018-ssl-and-pam-configuration#/3/7
-      3. Create rodsuser alissa and corresponding unix user with the appropriate
+
+      4. Create rodsuser alissa and corresponding unix user with the appropriate
          passwords as below.
     '''
 
@@ -162,7 +187,7 @@ class TestLogins(unittest.TestCase):
             with open(os.path.join(absdir,'irods_environment.json'),'w') as envfile:
                 envfile.write('{}')
             json_file_update(envfile.name, **dirs[absdir]['client_environment'])
-            with open(os.path.join(absdir,'.irodsA'),'wb') as secrets_file:
+            with open(os.path.join(absdir,'.irodsA'),'w') as secrets_file:
                 secrets_file.write(dirs[absdir]['secrets'])
             os.chmod(secrets_file.name,0o600)
 
@@ -202,6 +227,8 @@ class TestLogins(unittest.TestCase):
     def setUp(self):
         if not getattr(self, 'envdirs', []):
             self.skipTest('The test_rods_user "{}" does not exist'.format(self.test_rods_user))
+        if os.environ['HOME'] != '/var/lib/irods':
+            self.skipTest('Must be run as irods')
         super(TestLogins,self).setUp()
 
     def tearDown(self):
@@ -247,7 +274,8 @@ class TestLogins(unittest.TestCase):
                 with helpers.file_backed_up(env_file):
                     json_file_update( env_file, keys_to_delete=remove, **cli_env_extras )
                     session = iRODSSession(irods_env_file=env_file)
-                    out =  json.load(open(env_file))
+                    with open(env_file) as f:
+                        out =  json.load(f)
                     self.validate_session( session, verbose = verbosity, ssl = ssl_opt )
                     session.cleanup()
             out['ARGS']='no'
@@ -324,6 +352,156 @@ class TestLogins(unittest.TestCase):
 
     def test_8(self):
         self.tst0 ( ssl_opt = False, auth_opt = 'pam'    , env_opt = True  )
+
+class TestAnonymousUser(unittest.TestCase):
+
+    def setUp(self):
+        admin = self.admin = helpers.make_session()
+
+        user = self.user = admin.users.create('anonymous', 'rodsuser', admin.zone)
+        self.home = '/{admin.zone}/home/{user.name}'.format(**locals())
+
+        admin.collections.create(self.home)
+        acl = iRODSAccess('own', self.home, user.name)
+        admin.permissions.set(acl)
+
+        self.env_file = os.path.expanduser('~/.irods.anon/irods_environment.json')
+        self.env_dir = ( os.path.dirname(self.env_file))
+        self.auth_file = os.path.expanduser('~/.irods.anon/.irodsA')
+        os.mkdir( os.path.dirname(self.env_file))
+        json.dump( { "irods_host": admin.host,
+                     "irods_port": admin.port,
+                     "irods_user_name": user.name,
+                     "irods_zone_name": admin.zone }, open(self.env_file,'w'), indent=4 )
+
+    def tearDown(self):
+        self.admin.collections.remove(self.home, recurse = True, force = True)
+        self.admin.users.remove(self.user.name)
+        shutil.rmtree (self.env_dir, ignore_errors = True)
+
+    def test_login_from_environment(self):
+        orig_env = os.environ.copy()
+        try:
+            os.environ["IRODS_ENVIRONMENT_FILE"] = self.env_file
+            os.environ["IRODS_AUTHENTICATION_FILE"] = self.auth_file
+            ses = helpers.make_session()
+            ses.collections.get(self.home)
+        finally:
+            os.environ.clear()
+            os.environ.update( orig_env )
+
+class TestMiscellaneous(unittest.TestCase):
+
+    def test_nonanonymous_login_without_auth_file_fails__290(self):
+        ses = self.admin
+        if ses.users.get( ses.username ).type != 'rodsadmin':
+            self.skipTest( 'Only a rodsadmin may run this test.')
+        try:
+            ENV_DIR = tempfile.mkdtemp()
+            ses.users.create('bob', 'rodsuser')
+            ses.users.modify('bob', 'password', 'bpass')
+            d = dict(password = 'bpass', user = 'bob', host = ses.host, port = ses.port, zone = ses.zone)
+            (bob_env, bob_auth) = helpers.make_environment_and_auth_files(ENV_DIR, **d)
+            login_options = { 'irods_env_file': bob_env, 'irods_authentication_file': bob_auth }
+            with helpers.make_session(**login_options) as s:
+                s.users.get('bob')
+            os.unlink(bob_auth)
+            # -- Check that we raise an appropriate exception pointing to the missing auth file path --
+            with self.assertRaisesRegexp(NonAnonymousLoginWithoutPassword, bob_auth):
+                with helpers.make_session(**login_options) as s:
+                    s.users.get('bob')
+        finally:
+            try:
+                shutil.rmtree(ENV_DIR,ignore_errors=True)
+                ses.users.get('bob').remove()
+            except ex.UserDoesNotExist:
+                pass
+
+
+    def setUp(self):
+        admin = self.admin = helpers.make_session()
+        if admin.users.get(admin.username).type != 'rodsadmin':
+            self.skipTest('need admin privilege')
+        admin.users.create('alice','rodsuser')
+
+    def tearDown(self):
+        self.admin.users.remove('alice')
+        self.admin.cleanup()
+
+    @unittest.skipUnless(six.PY3, "Skipping in Python2 because it doesn't reliably do cyclic GC.")
+    def test_destruct_session_with_no_pool_315(self):
+
+        destruct_flag = [False]
+
+        class mySess( iRODSSession ):
+            def __del__(self):
+                self.pool = None
+                super(mySess,self).__del__()  # call parent destructor(s) - will raise
+                                              # an error before the #315 fix
+                destruct_flag[:] = [True]
+
+        admin = self.admin
+        admin.users.modify('alice','password','apass')
+
+        my_sess = mySess( user = 'alice',
+                          password = 'apass',
+                          host = admin.host,
+                          port = admin.port,
+                          zone = admin.zone)
+        my_sess.cleanup()
+        del my_sess
+        gc.collect()
+        self.assertEqual( destruct_flag, [True] )
+
+    def test_non_anon_native_login_omitting_password_fails_1__290(self):
+        # rodsuser with password unset
+        with self.assertRaises(ex.CAT_INVALID_USER):
+            self._non_anon_native_login_omitting_password_fails_N__290()
+
+    def test_non_anon_native_login_omitting_password_fails_2__290(self):
+        # rodsuser with a password set
+        self.admin.users.modify('alice','password','apass')
+        with self.assertRaises(ex.CAT_INVALID_AUTHENTICATION):
+            self._non_anon_native_login_omitting_password_fails_N__290()
+
+    def _non_anon_native_login_omitting_password_fails_N__290(self):
+        admin = self.admin
+        with iRODSSession(zone = admin.zone, port = admin.port, host = admin.host, user = 'alice') as alice:
+            alice.collections.get(helpers.home_collection(alice))
+
+class TestWithSSL(unittest.TestCase):
+    '''
+    The tests within this class should be run by an account other than the
+    service account.  Otherwise there is risk of corrupting the server setup.
+    '''
+
+    def setUp(self):
+        if os.path.expanduser('~') == '/var/lib/irods':
+            self.skipTest('TestWithSSL may not be run by user irods')
+        if not os.path.exists('/etc/irods/ssl'):
+            self.skipTest('Running setupssl.py as irods user is prerequisite for this test.')
+        with helpers.make_session() as session:
+            if not session.host in ('localhost', socket.gethostname()):
+                self.skipTest('Test must be run co-resident with server')
+
+
+    def test_ssl_with_server_verify_set_to_none_281(self):
+        env_file = os.path.expanduser('~/.irods/irods_environment.json')
+        with helpers.file_backed_up(env_file):
+            with open(env_file) as env_file_handle:
+                env = json.load( env_file_handle )
+            env.update({ "irods_client_server_negotiation": "request_server_negotiation",
+                         "irods_client_server_policy": "CS_NEG_REQUIRE",
+                         "irods_ssl_ca_certificate_file": "/path/to/some/file.crt",  # does not need to exist
+                         "irods_ssl_verify_server": "none",
+                         "irods_encryption_key_size": 32,
+                         "irods_encryption_salt_size": 8,
+                         "irods_encryption_num_hash_rounds": 16,
+                         "irods_encryption_algorithm": "AES-256-CBC" })
+            with open(env_file,'w') as f:
+                json.dump(env,f)
+            with helpers.make_session() as session:
+                session.collections.get('/{session.zone}/home/{session.username}'.format(**locals()))
 
 
 if __name__ == '__main__':

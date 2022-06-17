@@ -22,6 +22,7 @@ Currently supported:
 - Delete collections
 - Create data objects
 - Rename data objects
+- Checksum data objects
 - Delete data objects
 - Register files and directories
 - Query metadata for collections and data objects
@@ -246,6 +247,27 @@ Put an existing file as a new data object:
 56789
 
 
+Specifying paths
+----------------
+
+Path strings for collection and data objects are usually expected to be absolute in most contexts in the PRC. They
+must also be normalized to a form including single slashes separating path elements and no slashes at the string's end.
+If there is any doubt that a path string fulfills this requirement, the wrapper class :code:`irods.path.iRODSPath`
+(a subclass of :code:`str`) may be used to normalize it::
+
+    if not session.collections.exists( iRODSPath( potentially_unnormalized_path )): #....
+
+The wrapper serves also as a path joiner; thus::
+
+    iRODSPath( zone, "home", user )
+
+may replace::
+
+    "/".join(["", zone, "home", user])
+
+:code:`iRODSPath` is available beginning with PRC release :code:`v1.1.2`.
+
+
 Reading and writing files
 -------------------------
 
@@ -260,6 +282,41 @@ PRC provides `file-like objects <http://docs.python.org/2/library/stdtypes.html#
 ...
 foo
 bar
+
+
+Computing and Retrieving Checksums
+----------------------------------
+
+Each data object may be associated with a checksum by calling chksum() on the object in question.  Various
+behaviors can be elicited by passing in combinations of keywords (for a description of which, please consult the
+`header documentation <https://github.com/irods/irods/blob/4-2-stable/lib/api/include/dataObjChksum.h>`_ .)
+
+As with most other iRODS APIs, it is straightforward to specify keywords by adding them to an option dictionary:
+
+>>> data_object_1.chksum()  # - computes the checksum if already in the catalog, otherwise computes and stores it
+...                         #   (ie. default behavior with no keywords passed in.)
+>>> from irods.manager.data_object_manager import Server_Checksum_Warning
+>>> import irods.keywords as kw
+>>> opts = { kw.VERIFY_CHKSUM_KW:'' }
+>>> try:
+...     data_object_2.chksum( **opts )  # - Uses verification option. (Does not auto-vivify a checksum field).
+...     # or:
+...     opts[ kw.NO_COMPUTE_KW ] = ''
+...     data_object_2.chksum( **opts )  # - Uses both verification and no-compute options. (Like ichksum -K --no-compute)
+... except Server_Checksum_Warning:
+...     print('some checksums are missing or wrong')
+
+Additionally, if a freshly created irods.message.RErrorStack instance is given, information can be returned and read by
+the client:
+
+>>> r_err_stk = RErrorStack()
+>>> warn = None
+>>> try:  # Here, data_obj has one replica, not yet checksummed.
+...     data_obj.chksum( r_error = r_err_stk , **{kw.VERIFY_CHKSUM_KW:''} )
+... except Server_Checksum_Warning as exc:
+...     warn = exc
+>>> print(r_err_stk)
+[RError<message = u'WARNING: No checksum available for replica [0].', status = -862000 CAT_NO_CHECKSUM_FOR_REPLICA>]
 
 
 Working with metadata
@@ -382,6 +439,196 @@ function uses the atomic metadata API to very quickly remove all AVUs from an ob
 >>> def remove_all_avus( Object ):
 ...     avus_on_Object = Object.metadata.items()
 ...     Object.metadata.apply_atomic_operations( *[AVUOperation(operation='remove', avu=i) for i in avus_on_Object] )
+
+
+Special Characters
+------------------
+
+Of course, it is fine to put Unicode characters into your collection and data object names.  However, certain
+non-printable ASCII characters, and the backquote character as well, have historically presented problems -
+especially for clients using iRODS's human readable XML protocol.  Consider this small, only slighly contrived,
+application:
+::
+
+    from irods.test.helpers import make_session
+
+    def create_notes( session, obj_name, content = u'' ):
+        get_home_coll = lambda ses: "/{0.zone}/home/{0.username}".format(ses)
+        path = get_home_coll(session) + "/" + obj_name
+        with session.data_objects.open(path,"a") as f:
+            f.seek(0, 2) # SEEK_END
+            f.write(content.encode('utf8'))
+        return session.data_objects.get(path)
+
+    with make_session() as session:
+
+        # Example 1 : exception thrown when name has non-printable character
+        try:
+            create_notes( session, "lucky\033.dat", content = u'test' )
+        except:
+            pass
+
+        # Example 2 (Ref. issue: irods/irods #4132, fixed for 4.2.9 release of iRODS)
+        print(
+            create_notes( session, "Alice`s diary").name  # note diff (' != `) in printed name
+        )
+
+
+This creates two data objects, but with less than optimal success.  The first example object
+is created but receives no content because an exception is thrown trying to query its name after
+creation.   In the second example, for iRODS 4.2.8 and before, a deficiency in packStruct XML protocol causes
+the backtick to be read back as an apostrophe, which could create problems manipulating or deleting the object later.
+
+As of PRC v1.1.0, we can mitigate both problems by switching in the QUASI_XML parser for the default one:
+::
+
+    from irods.message import (XML_Parser_Type, ET)
+    ET( XML_Parser.QUASI_XML, session.server_version )
+
+Two dedicated environment variables may also be used to customize the Python client's XML parsing behavior via the
+setting of global defaults during start-up.
+
+For example, we can set the default parser to QUASI_XML, optimized for use with version 4.2.8 of the iRODS server,
+in the following manner:
+::
+
+    Bash-Shell> export PYTHON_IRODSCLIENT_DEFAULT_XML=QUASI_XML PYTHON_IRODSCLIENT_QUASI_XML_SERVER_VERSION=4,2,8
+
+Other alternatives for PYTHON_IRODSCLIENT_DEFAULT_XML are "STANDARD_XML" and "SECURE_XML".  These two latter options
+denote use of the xml.etree and defusedxml modules, respectively.
+
+Only the choice of "QUASI_XML" is affected by the specification of a particular server version.
+
+Finally, note that these global defaults, once set, may be overridden on a per-thread basis using
+:code:`ET(parser_type, server_version)`.  We can also revert the current thread's XML parser back to the
+global default by calling :code:`ET(None)`.
+
+
+Rule Execution
+--------------
+
+A simple example of how to execute an iRODS rule from the Python client is as follows.  Suppose we have a rule file
+:code:`native1.r` which contains a rule in native iRODS Rule Language::
+
+  main() {
+      writeLine("*stream",
+                *X ++ " squared is " ++ str(double(*X)^2) )
+  }
+
+  INPUT *X="3", *stream="serverLog"
+  OUTPUT null
+
+The following Python client code will run the rule and produce the appropriate output in the
+irods server log::
+
+  r = irods.rule.Rule( session, rule_file = 'native1.r')
+  r.execute()
+
+With release v1.1.1, not only can we target a specific rule engine instance by name (which is useful when
+more than one is present), but we can also use a file-like object for the :code:`rule_file` parameter::
+
+  Rule( session, rule_file = io.StringIO(u'''mainRule() { anotherRule(*x); writeLine('stdout',*x) }\n'''
+                                         u'''anotherRule(*OUT) {*OUT='hello world!'}\n\n'''
+                                         u'''OUTPUT ruleExecOut\n'''),
+        instance_name = 'irods_rule_engine_plugin-irods_rule_language-instance' )
+
+Incidentally, if we wanted to change the :code:`native1.r` rule code print to stdout also, we could set the
+:code:`INPUT` parameter, :code:`*stream`, using the Rule constructor's :code:`params` keyword argument.
+Similarly, we can change the :code:`OUTPUT` parameter from :code:`null` to :code:`ruleExecOut`, to accommodate
+the output stream, via the :code:`output` argument::
+
+  r = irods.rule.Rule( session, rule_file = 'native1.r',
+             instance_name = 'irods_rule_engine_plugin-irods_rule_language-instance',
+             params={'*stream':'"stdout"'} , output = 'ruleExecOut' )
+  output = r.execute( )
+  if output and len(output.MsParam_PI):
+      buf = output.MsParam_PI[0].inOutStruct.stdoutBuf.buf
+      if buf: print(buf.rstrip(b'\0').decode('utf8'))
+
+(Changing the input value to be squared in this example is left as an exercise for the reader!)
+
+To deal with errors resulting from rule execution failure, two approaches can be taken. Suppose we
+have defined this in the :code:`/etc/irods/core.re` rule-base::
+
+  rule_that_fails_with_error_code(*x) {
+    *y = (if (*x!="") then int(*x) else 0)
+  # if (SOME_PROCEDURE_GOES_WRONG) {
+      if (*y < 0) { failmsg(*y,"-- my error message --"); }  #-> throws an error code of int(*x) in REPF
+      else { fail(); }                                       #-> throws FAIL_ACTION_ENCOUNTERED_ERR in REPF
+  # }
+  }
+
+We can run the rule thus:
+
+>>> Rule( session, body='rule_that_fails_with_error_code(""), instance_name = 'irods_rule_engine_plugin-irods_rule_language-instance',
+...     ).execute( r_error = (r_errs:= irods.message.RErrorStack()) )
+
+Where we've used the Python 3.8 "walrus operator" for brevity.  The error will automatically be caught and translated to a
+returned-error stack::
+
+  >>> pprint.pprint([vars(r) for r in r_errs])
+  [{'raw_msg_': 'DEBUG: fail action encountered\n'
+                'line 14, col 15, rule base core\n'
+                '        else { fail(); }\n'
+                '               ^\n'
+                '\n',
+    'status_': -1220000}]
+
+Note, if a stringized negative integer is given , ie. as a special fail code to be thrown within the rule,
+we must add this code into a special parameter to have this automatically caught as well:
+
+>>> Rule( session, body='rule_that_fails_with_error_code("-2")',instance_name = 'irods_rule_engine_plugin-irods_rule_language-instance'
+...     ).execute( acceptable_errors = ( FAIL_ACTION_ENCOUNTERED_ERR, -2),
+...                r_error = (r_errs := irods.message.RErrorStack()) )
+
+Because the rule is written to emit a custom error message via failmsg in this case, the resulting r_error stack will now include that
+custom error message as a substring::
+
+  >>> pprint.pprint([vars(r) for r in r_errs])
+  [{'raw_msg_': 'DEBUG: -- my error message --\n'
+                'line 21, col 20, rule base core\n'
+                '      if (*y < 0) { failmsg(*y,"-- my error message --"); }  '
+                '#-> throws an error code of int(*x) in REPF\n'
+                '                    ^\n'
+                '\n',
+    'status_': -1220000}]
+
+Alternatively, or in combination with the automatic catching of errors, we may also catch errors as exceptions on the client
+side.  For example, if the Python rule engine is configured, and the following rule is placed in :code:`/etc/irods/core.py`::
+
+  def python_rule(rule_args, callback, rei):
+  #   if some operation fails():
+          raise RuntimeError
+
+we can trap the error thus::
+
+  try:
+      Rule( session, body = 'python_rule', instance_name = 'irods_rule_engine_plugin-python-instance' ).execute()
+  except irods.exception.RULE_ENGINE_ERROR:
+      print('Rule execution failed!')
+      exit(1)
+  print('Rule execution succeeded!')
+
+As fail actions from native rules are not thrown by default (refer to the help text for :code:`Rule.execute`), if we
+anticipate these and prefer to catch them as exceptions, we can do it this way::
+
+  try:
+      Rule( session, body = 'python_rule', instance_name = 'irods_rule_engine_plugin-python-instance'
+           ).execute( acceptable_errors = () )
+  except (irods.exception.RULE_ENGINE_ERROR,
+          irods.exception.FAIL_ACTION_ENCOUNTERED_ERR) as e:
+      print('Rule execution failed!')
+      exit(1)
+  print('Rule execution succeeded!')
+
+Finally,  keep in mind that rule code submitted through an :code:`irods.rule.Rule` object is processed by the
+exec_rule_text function in the targeted plugin instance.  This may be a limitation for plugins not equipped to
+handle rule code in this way.  In a sort of middle-ground case, the iRODS Python Rule Engine Plugin is not
+currently able to handle simple rule calls and the manipulation of iRODS core primitives (like simple parameter
+passing and variable expansion') as flexibly as the iRODS Rule Language.
+
+Also, core.py rules may not be run directly (as is also true with :code:`irule`) by other than a rodsadmin user
+pending the resolution of `this issue <https://github.com/irods/irods_rule_engine_plugin_python/issues/105>`_.
 
 
 General queries
@@ -651,6 +898,84 @@ As stated, this type of object discovery requires some extra study and effort, b
 (to which we are federated and have the user permissions) is powerful indeed.
 
 
+Tickets
+-------
+
+The :code:`irods.ticket.Ticket` class lets us issue "tickets" which grant limited
+permissions for other users to access our own data objects (or collections of
+data objects).   As with the iticket client, the access may be either "read"
+or "write".  The recipient of the ticket could be a rodsuser, or even an
+anonymous user.
+
+Below is a demonstration of how to generate a new ticket for access to a
+logical path - in this case, say a collection containing 1 or more data objects.
+(We assume the creation of the granting_session and receiving_session for the users
+respectively for the users providing and consuming the ticket access.)
+
+The user who wishes to provide an access may execute the following:
+
+>>> from irods.ticket import Ticket
+>>> new_ticket = Ticket (granting_session)
+>>> The_Ticket_String = new_ticket.issue('read', 
+...     '/zone/home/my/collection_with_data_objects_for/somebody').string
+
+at which point that ticket's unique string may be given to other users, who can then apply the
+ticket to any existing session object in order to gain access to the intended object(s):
+
+>>> from irods.models import Collection, DataObject
+>>> ses = receiving_session
+>>> Ticket(ses, The_Ticket_String).supply()
+>>> c_result = ses.query(Collection).one()
+>>> c = iRODSCollection( ses.collections, c_result)
+>>> for dobj in (c.data_objects):
+...     ses.data_objects.get( dobj.path, '/tmp/' + dobj.name ) # download objects
+
+In this case, however, modification will not be allowed because the ticket is for read only:
+
+>>> c.data_objects[0].open('w').write(  # raises
+...     b'new content')                 #  CAT_NO_ACCESS_PERMISSION
+
+In another example, we could generate a ticket that explicitly allows 'write' access on a
+specific data object, thus granting other users the permissions to modify as well as read it:
+
+>>> ses = iRODSSession( user = 'anonymous', password = '', host = 'localhost',
+                        port = 1247, zone = 'tempZone')
+>>> Ticket(ses, write_data_ticket_string ).supply()
+>>> d_result = ses.query(DataObject.name,Collection.name).one()
+>>> d_path = ( d_result[Collection.name] + '/' +
+...            d_result[DataObject.name] )
+>>> old_content = ses.data_objects.open(d_path,'r').read()
+>>> with tempfile.NamedTemporaryFile() as f:
+...     f.write(b'blah'); f.flush()
+...     ses.data_objects.put(f.name,d_path)
+
+As with iticket, we may set a time limit on the availability of a ticket, either as a
+timestamp or in seconds since the epoch:
+
+>>> t=Ticket(ses); s = t.string
+vIOQ6qzrWWPO9X7
+>>> t.issue('read','/some/path')
+>>> t.modify('expiry','2021-04-01.12:34:56')  # timestamp assumed as UTC
+
+To check the results of the above, we could invoke this icommand elsewhere in a shell prompt:
+
+:code:`iticket ls vIOQ6qzrWWPO9X7`
+
+and the server should report back the same expiration timestamp.
+
+And, if we are the issuer of a ticket, we may also query, filter on, and
+extract information based on a ticket's attributes and catalog relations:
+
+>>> from irods.models import TicketQuery
+>>> delay = lambda secs: int( time.time() + secs + 1)
+>>> Ticket(ses).issue('read','/path/to/data_object').modify(
+                      'expiry',delay(7*24*3600))             # lasts 1 week
+>>> Q = ses.query (TicketQuery.Ticket, TicketQuery.DataObject).filter(
+...                                                            TicketQuery.DataObject.name == 'data_object')
+>>> print ([ _[TicketQuery.Ticket.expiry_ts] for _ in Q ])
+['1636757427']
+
+
 Tracking and manipulating replicas of Data objects
 --------------------------------------------------
 
@@ -781,4 +1106,88 @@ If you want to create a user in a federated zone, use:
 And more...
 -----------
 
-Additional code samples are available in the `test directory <https://github.com/irods/python-irodsclient/tree/master/irods/test>`_
+Additional code samples are available in the `test directory <https://github.com/irods/python-irodsclient/tree/main/irods/test>`_
+
+
+=======
+Testing
+=======
+
+Setting up and running tests
+----------------------------
+
+The Python iRODS Client comes with its own suite of tests.  Some amount of setting up may be necessary first:
+
+1. Use :code:`iinit` to specify the iRODS client environment.
+   For best results, point the client at a server running on the local host.
+
+2. Install the python-irodsclient along with the :code:`unittest unittest_xml_reporting` module or the older :code:`xmlrunner` equivalent.
+
+   - for PRC versions 1.1.1 and later:
+
+     *  :code:`pip install ./path-to-python-irodsclient-repo[tests]`  (when using a local Git repo); or,
+     *  :code:`pip install python-irodsclient[tests]'>=1.1.1'`  (when installing directly from PyPI).
+
+   - earlier releases (<= 1.1.0) will install the outdated :code:`xmlrunner` module automatically
+
+3. Follow further instructions in the `test directory <https://github.com/irods/python-irodsclient/tree/main/irods/test>`_
+
+
+Testing S3 parallel transfer
+----------------------------
+
+System requirements::
+
+- Ubuntu 18 user with Docker installed.
+- Local instance of iRODS server running.
+- Logged in sudo privileges.
+
+Run a MinIO service::
+
+  $ docker run -d -p 9000:9000 -p 9001:9001 minio/minio server /data --console-address ":9001"
+
+Set up a bucket :code:`s3://irods` under MinIO::
+
+  $ pip install awscli
+
+  $ aws configure
+  AWS Access Key ID [None]: minioadmin
+  AWS Secret Access Key [None]: minioadmin
+  Default region name [None]:
+  Default output format [None]:
+
+  $ aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://irods
+
+Set up s3 credentials for the iRODS s3 storage resource::
+
+  $ sudo su - irods -c "/bin/echo -e 'minioadmin\nminioadmin' >/var/lib/irods/s3-credentials"
+  $ sudo chown 600 /var/lib/irods/s3-credentials
+
+Create the s3 storage resource::
+
+  $ sudo apt install irods-resource-plugin-s3
+
+As the 'irods' service account user::
+
+  $ iadmin mkresc s3resc s3 $(hostname):/irods/ \
+    "S3_DEFAULT_HOSTNAME=localhost:9000;"\
+    "S3_AUTH_FILE=/var/lib/irods/s3-credentials;"\
+    "S3_REGIONNAME=us-east-1;"\
+    "S3_RETRY_COUNT=1;"\
+    "S3_WAIT_TIME_SEC=3;"\
+    "S3_PROTO=HTTP;"\
+    "ARCHIVE_NAMING_POLICY=consistent;"\
+    "HOST_MODE=cacheless_attached"
+
+  $ dd if=/dev/urandom of=largefile count=40k bs=1k # create 40-megabyte test file
+
+  $ pip install 'python-irodsclient>=1.1.2'
+
+  $ python -c"from irods.test.helpers import make_session
+              import irods.keywords as kw
+              with make_session() as sess:
+                  sess.data_objects.put( 'largefile',
+                                         '/tempZone/home/rods/largeFile1',
+                                         **{kw.DEST_RESC_NAME_KW:'s3resc'} )
+                  sess.data_objects.get( '/tempZone/home/rods/largeFile1',
+                                         '/tmp/largefile')"
