@@ -3,11 +3,15 @@
 from __future__ import absolute_import
 import os
 import sys
+import time
+import datetime
 import unittest
 from irods.meta import (iRODSMeta, AVUOperation, BadAVUOperationValue, BadAVUOperationKeyword)
 from irods.manager.metadata_manager import InvalidAtomicAVURequest
 from irods.models import (DataObject, Collection, Resource)
 import irods.test.helpers as helpers
+import irods.keywords as kw
+from irods.session import iRODSSession
 from six.moves import range
 from six import PY3
 
@@ -218,6 +222,45 @@ class TestMeta(unittest.TestCase):
         assert len(meta) == 0
 
 
+    def test_metadata_manipulations_with_admin_kw__364__365(self):
+        try:
+            d = user = None
+            adm = self.sess
+
+            if adm.server_version <= (4,2,11):
+                self.skipTest('ADMIN_KW not valid for Metadata API in iRODS 4.2.11 and previous')
+
+            # Create a rodsuser, and a session for that roduser.
+            user = adm.users.create ( 'bobby','rodsuser' )
+            user.modify('password','bpass')
+            with iRODSSession (port=adm.port,zone=adm.zone,host=adm.host, user=user.name,password='bpass') as ses:
+                # Create a data object owned by the rodsuser.  Set AVUs in various ways and guarantee each attempt
+                # has the desired effect.
+                d = ses.data_objects.create('/{adm.zone}/home/{user.name}/testfile'.format(**locals()))
+
+                d.metadata.set('a','aa','1')
+                self.assertIn(('a','aa','1'), d.metadata.items())
+
+                d.metadata.set('a','aa')
+                self.assertEqual([('a','aa')], [tuple(_) for _ in d.metadata.items()])
+
+                d.metadata['a'] = iRODSMeta('a','bb')
+                self.assertEqual([('a','bb')], [tuple(_) for _ in d.metadata.items()])
+
+                # Now the admin does two AVU-set operations.  A successful test of these operations' success
+                # includes that both ('x','y') has been added and ('a','b','c') has overwritten ('a','bb').
+
+                da = adm.data_objects.get(d.path)
+                da.metadata.set('a','b','c',**{kw.ADMIN_KW:''})
+                da.metadata(admin = True)['x'] = iRODSMeta('x','y')
+                d = ses.data_objects.get(d.path) # assure metadata are not cached
+                self.assertEqual(set([('x','y'), ('a','b','c')]),
+                                 set(tuple(_) for _ in d.metadata.items()))
+        finally:
+            if d: d.unlink(force=True)
+            if user: user.remove()
+
+
     def test_add_coll_meta(self):
         # add metadata to test collection
         self.sess.metadata.add(Collection, self.coll_path,
@@ -355,6 +398,49 @@ class TestMeta(unittest.TestCase):
         # remove test collection
         test_obj.unlink(force=True)
 
+
+    @staticmethod
+    def check_timestamps(metadata_accessor, key):
+        avu = metadata_accessor[key]
+        create = getattr(avu,'create_time',None)
+        modify = getattr(avu,'modify_time',None)
+        return (create,modify)
+
+
+    def test_timestamp_access_386(self):
+        with helpers.make_session() as session:
+            def units():
+                return str(time.time())
+            d = None
+            try:
+                d = session.data_objects.create('/tempZone/home/rods/issue_386')
+
+                # Test metadata access without timestamps
+
+                meta = d.metadata
+                avu = iRODSMeta('no_ts','val',units())
+                meta.set(avu)
+                self.assertEqual((None, None),		# Assert no timestamps are stored.
+                                 self.check_timestamps(meta, key = avu.name))
+
+                # -- Test metadata access with timestamps
+
+                meta_ts = meta(timestamps = True)
+                avu_use_ts = iRODSMeta('use_ts','val',units())
+                meta_ts.set(avu_use_ts)
+                time.sleep(1.5)
+                now = datetime.datetime.utcnow()
+                time.sleep(1.5)
+                avu_use_ts.units = units()
+                meta_ts.set(avu_use_ts)			# Set an AVU with modified units.
+
+                (create, modify) = self.check_timestamps(meta_ts, key = avu_use_ts.name)
+
+                self.assertLess(create, now)		#  Ensure timestamps are in proper order.
+                self.assertLess(now, modify)
+            finally:
+                if d: d.unlink(force = True)
+                helpers.remove_unused_metadata(session)
 
 if __name__ == '__main__':
     # let the tests find the parent irods lib

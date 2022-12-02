@@ -118,6 +118,11 @@ class SystemException(iRODSException):
     pass
 
 
+class ExceptionOpenIDAuthUrl(iRODSException):
+    def __init__(self, URL):
+        self.URL=URL
+
+
 class SYS_SOCK_OPEN_ERR(SystemException):
     code = -1000
 
@@ -554,6 +559,18 @@ class SYS_INVALID_INPUT_PARAM(SystemException):
     code = -130000
 
 
+class SYS_BAD_INPUT(iRODSException):
+    code = -158000
+
+
+class SYS_REPLICA_DOES_NOT_EXIST(iRODSException):
+    code = -164000
+
+
+class SYS_NOT_ALLOWED(iRODSException):
+    code = -169000
+
+
 class UserInputException(iRODSException):
     pass
 
@@ -752,6 +769,10 @@ class OBJ_PATH_DOES_NOT_EXIST(iRODSException):
 
 class LOCKED_DATA_OBJECT_ACCESS(SystemException):
     code = -406000
+
+
+class USER_INCOMPATIBLE_PARAMS(iRODSException):
+    code = -402000
 
 
 class CHECK_VERIFICATION_RESULTS(SystemException):

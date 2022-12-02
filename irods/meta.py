@@ -2,11 +2,21 @@
 
 class iRODSMeta(object):
 
-    def __init__(self, name, value, units=None, avu_id=None):
+    def __init__(self, name, value, units=None, avu_id=None, create_time=None, modify_time=None):
         self.avu_id = avu_id
         self.name = name
         self.value = value
         self.units = units
+        self.create_time = create_time
+        self.modify_time = modify_time
+
+    def __eq__(self, other):
+        return tuple(self) == tuple(other)
+
+    def __iter__(self):
+        yield self.name
+        yield self.value
+        if self.units: yield self.units
 
     def __repr__(self):
         return "<iRODSMeta {avu_id} {name} {value} {units}>".format(**vars(self))
@@ -62,7 +72,15 @@ class AVUOperation(dict):
             setattr(self,atr,locals()[atr])
 
 
+import copy
+
 class iRODSMetaCollection(object):
+
+    def __call__(self, admin = False, timestamps = False, **opts):
+        x = copy.copy(self)
+        x._manager = (x._manager)(admin, timestamps, **opts)
+        x._reset_metadata()
+        return x
 
     def __init__(self, manager, model_cls, path):
         self._manager = manager
@@ -103,20 +121,28 @@ class iRODSMetaCollection(object):
         self._manager.apply_atomic_operations(self._model_cls, self._path, *avu_ops)
         self._reset_metadata()
 
-    def add(self, *args):
+    def set(self, *args, **opts):
+        """
+        Set as iRODSMeta to a key
+        """
+        meta = self._get_meta(*args)
+        self._manager.set(self._model_cls, self._path, meta, **opts)
+        self._reset_metadata()
+
+    def add(self, *args, **opts):
         """
         Add as iRODSMeta to a key
         """
         meta = self._get_meta(*args)
-        self._manager.add(self._model_cls, self._path, meta)
+        self._manager.add(self._model_cls, self._path, meta, **opts)
         self._reset_metadata()
 
-    def remove(self, *args):
+    def remove(self, *args, **opts):
         """
         Removes an iRODSMeta
         """
         meta = self._get_meta(*args)
-        self._manager.remove(self._model_cls, self._path, meta)
+        self._manager.remove(self._model_cls, self._path, meta, **opts)
         self._reset_metadata()
 
     def items(self):
@@ -171,7 +197,7 @@ class iRODSMetaCollection(object):
         values = self.get_all(key)
         return len(values) > 0
 
-    def remove_all(self):
+    def remove_all(self, **opts):
         for meta in self._meta:
-            self._manager.remove(self._model_cls, self._path, meta)
+            self._manager.remove(self._model_cls, self._path, meta, **opts)
         self._reset_metadata()

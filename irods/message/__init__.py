@@ -12,7 +12,6 @@ import defusedxml.ElementTree as ET_secure_xml
 from . import quasixml as ET_quasi_xml
 from collections import namedtuple
 import os
-import fcntl
 import ast
 import threading
 from irods.message.message import Message
@@ -117,7 +116,7 @@ def XML_entities_active():
 
 # ET() [no-args form] will just fetch the current thread's XML parser settings
 
-def ET(xml_type = 0, server_version = None):
+def ET(xml_type = (), server_version = None):
     """
     Return the module used to parse XML from iRODS protocol messages text.
 
@@ -127,13 +126,15 @@ def ET(xml_type = 0, server_version = None):
       * QUASI_XML is custom parser designed to be more compatible with the use of
         non-printable characters in object names.
       * STANDARD_XML uses the standard module, xml.etree.ElementTree.
+      * an empty tuple is the default argument for `xml_type', imparting the same 
+        semantics as for the argumentless form ET(), ie., short-circuit any parser change.
 
     `server_version', if given, should be a list or tuple specifying the version of the connected iRODS server.
 
     """
-    if xml_type is not 0:
-        _thrlocal.xml_type = default_XML_parser() if xml_type in (None, XML_Parser_Type(0)) \
-                        else XML_Parser_Type(xml_type)
+    if xml_type != ():
+        _thrlocal.xml_type = (default_XML_parser() if xml_type in (None, XML_Parser_Type(0)) 
+                              else XML_Parser_Type(xml_type))
     if isinstance(server_version, _TUPLE_LIKE_TYPES):
         _thrlocal.irods_server_version = tuple(server_version)  #  A default server version for Quasi-XML parsing is set (from the environment) and
     return _XML_parsers[current_XML_parser()]                   #  applies to all threads in which ET() has not been called to update the value.
@@ -153,7 +154,15 @@ except NameError:
 
 
 # Necessary for older python (<3.7):
-_socket_is_blocking = (lambda self: 0 == fcntl.fcntl(self.fileno(), fcntl.F_GETFL) & os.O_NONBLOCK)
+
+def _socket_is_blocking(sk):
+    try:
+        return sk.getblocking()
+    except AttributeError:
+        # Python 3.7+ docs say sock.getblocking() is equivalent to checking if sock.gettimeout() == 0, but this is misleading.
+        # Manual testing shows this to be a more accurate equivalent:
+        timeout = sk.gettimeout()
+        return (timeout is None or timeout > 0)
 
 def _recv_message_in_len(sock, size):
     size_left = size
@@ -442,6 +451,11 @@ class PamAuthRequestOut(Message):
     @builtins.property
     def result_(self): return self.irodsPamPassword
 
+class OpenIDAuthMessage(Message):
+    _name = 'authPlugReqInp_PI'
+    auth_scheme_ = StringProperty()
+    context_ = StringProperty()
+
 
 
 # define InxIvalPair_PI "int iiLen; int *inx(iiLen); int *ivalue(iiLen);"
@@ -673,18 +687,19 @@ class ObjCopyRequest(Message):
     srcDataObjInp_PI = SubmessageProperty(FileOpenRequest)
     destDataObjInp_PI = SubmessageProperty(FileOpenRequest)
 
-# define ModAVUMetadataInp_PI "str *arg0; str *arg1; str *arg2; str *arg3;
-# str *arg4; str *arg5; str *arg6; str *arg7;  str *arg8;  str *arg9;"
 
+# define ModAVUMetadataInp_PI "str *arg0; str *arg1; str *arg2; str *arg3;
+# str *arg4; str *arg5; str *arg6; str *arg7;  str *arg8;  str *arg9; struct KeyValPair_PI"
 
 class MetadataRequest(Message):
     _name = 'ModAVUMetadataInp_PI'
 
-    def __init__(self, *args):
+    def __init__(self, *args, **metadata_opts):
         super(MetadataRequest, self).__init__()
         for i in range(len(args)):
             if args[i]:
                 setattr(self, 'arg%d' % i, args[i])
+        self.KeyValPair_PI = StringStringMap(metadata_opts)
 
     arg0 = StringProperty()
     arg1 = StringProperty()
@@ -696,6 +711,9 @@ class MetadataRequest(Message):
     arg7 = StringProperty()
     arg8 = StringProperty()
     arg9 = StringProperty()
+
+    KeyValPair_PI = SubmessageProperty(StringStringMap)
+
 
 # define modAccessControlInp_PI "int recursiveFlag; str *accessLevel; str
 # *userName; str *zone; str *path;"
@@ -793,39 +811,29 @@ class GetTempPasswordOut(Message):
 #in iRODS <= 4.2.10:
 #define ticketAdminInp_PI "str *arg1; str *arg2; str *arg3; str *arg4; str *arg5; str *arg6;"
 
-#in iRODS <= 4.2.11:
+#in iRODS >= 4.2.11:
 #define ticketAdminInp_PI "str *arg1; str *arg2; str *arg3; str *arg4; str *arg5; str *arg6; struct KeyValPair_PI;"
 
-def TicketAdminRequest(session):
 
-    # class is different depending on server version
+class TicketAdminRequest(Message):
+    _name = 'ticketAdminInp_PI'
 
-    SERVER_REQUIRES_KEYVAL_PAIRS = (session.server_version >= (4,2,11))
+    def __init__(self, *args,**ticketOpts):
+        super(TicketAdminRequest, self).__init__()
+        for i in range(6):
+            if i < len(args) and args[i]:
+                setattr(self, 'arg{0}'.format(i+1), str(args[i]))
+            else:
+                setattr(self, 'arg{0}'.format(i+1), "")
+        self.KeyValPair_PI = StringStringMap(ticketOpts)
 
-    class TicketAdminRequest_(Message):
-        _name = 'ticketAdminInp_PI'
-
-        def __init__(self, *args,**ticketOpts):
-            super(TicketAdminRequest_, self).__init__()
-            for i in range(6):
-                if i < len(args) and args[i]:
-                    setattr(self, 'arg{0}'.format(i+1), str(args[i]))
-                else:
-                    setattr(self, 'arg{0}'.format(i+1), "")
-            if SERVER_REQUIRES_KEYVAL_PAIRS:
-                self.KeyValPair_PI = StringStringMap(ticketOpts)
-
-        arg1 = StringProperty()
-        arg2 = StringProperty()
-        arg3 = StringProperty()
-        arg4 = StringProperty()
-        arg5 = StringProperty()
-        arg6 = StringProperty()
-
-        if SERVER_REQUIRES_KEYVAL_PAIRS:
-            KeyValPair_PI = SubmessageProperty(StringStringMap)
-
-    return TicketAdminRequest_
+    arg1 = StringProperty()
+    arg2 = StringProperty()
+    arg3 = StringProperty()
+    arg4 = StringProperty()
+    arg5 = StringProperty()
+    arg6 = StringProperty()
+    KeyValPair_PI = SubmessageProperty(StringStringMap)
 
 
 #define specificQueryInp_PI "str *sql; str *arg1; str *arg2; str *arg3; str *arg4; str *arg5; str *arg6; str *arg7; str *arg8; str *arg9; str *arg10; int maxRows; int continueInx; int rowOffset; int options; struct KeyValPair_PI;"

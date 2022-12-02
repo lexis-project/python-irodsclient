@@ -161,8 +161,14 @@ class DataObjectManager(Manager):
                     for chunk in chunks(f, self.WRITE_BUFFER_SIZE):
                         o.write(chunk)
         if kw.ALL_KW in options:
-            options[kw.UPDATE_REPL_KW] = ''
-            self.replicate(obj, **options)
+            repl_options = options.copy()
+            repl_options[kw.UPDATE_REPL_KW] = ''
+            # Leaving REG_CHKSUM_KW set would raise the error:
+            # Requested to register checksum without verifying, but source replica has a checksum. This can result
+            # in multiple replicas being marked good with different checksums, which is an inconsistency.
+            del repl_options[kw.REG_CHKSUM_KW]
+            self.replicate(obj, **repl_options)
+
 
         if return_data_object:
             return self.get(obj)
@@ -328,6 +334,25 @@ class DataObjectManager(Manager):
         raw = iRODSDataObjectFileRaw(conn, desc, finalize_on_close = finalize_on_close, **options)
         (_raw_fd_holder).append(raw)
         return io.BufferedRandom(raw)
+
+
+    def trim(self, path, **options):
+
+        message_body = FileOpenRequest(
+            objPath=path,
+            createMode=0,
+            openFlags=0,
+            offset=0,
+            dataSize=-1,
+            numThreads=self.sess.numThreads,
+            KeyValPair_PI=StringStringMap(options),
+        )
+        message = iRODSMessage('RODS_API_REQ', msg=message_body,
+                               int_info=api_number['DATA_OBJ_TRIM_AN'])
+
+        with self.sess.pool.get_connection() as conn:
+            conn.send(message)
+            response = conn.recv()
 
 
     def unlink(self, path, force=False, **options):

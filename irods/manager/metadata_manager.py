@@ -1,14 +1,16 @@
 from __future__ import print_function
 from __future__ import absolute_import
 import logging
+import copy
 from os.path import dirname, basename
 
 from irods.manager import Manager
-from irods.message import MetadataRequest, iRODSMessage, JSON_Message
+from irods.message import (MetadataRequest, iRODSMessage, JSON_Message)
 from irods.api_number import api_number
 from irods.models import (DataObject, Collection, Resource,
                           User, DataObjectMeta, CollectionMeta, ResourceMeta, UserMeta)
 from irods.meta import iRODSMeta, AVUOperation
+import irods.keywords as kw
 
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,25 @@ class InvalidAtomicAVURequest(Exception): pass
 
 
 class MetadataManager(Manager):
+
+    @property
+    def use_timestamps(self):
+        return getattr(self,'_use_ts',False)
+
+    __kw = {}  # default (empty) keywords
+
+    def _updated_keywords(self,opts):
+        kw_ = self.__kw.copy()
+        kw_.update(opts)
+        return kw_
+
+    def __call__(self, admin = False, timestamps = False, **irods_kw_opt):
+        if admin:
+            irods_kw_opt.update([(kw.ADMIN_KW,"")])
+        new_self = copy.copy(self)
+        new_self._use_ts = timestamps
+        new_self.__kw = irods_kw_opt
+        return new_self
 
     @staticmethod
     def _model_class_to_resource_type(model_cls):
@@ -54,16 +75,26 @@ class MetadataManager(Manager):
             'R': [Resource.name == path],
             'u': [User.name == path]
         }[resource_type]
-        results = self.sess.query(model.id, model.name, model.value, model.units)\
-            .filter(*conditions).all()
-        return [iRODSMeta(
-            row[model.name],
-            row[model.value],
-            row[model.units],
-            avu_id=row[model.id]
-        ) for row in results]
 
-    def add(self, model_cls, path, meta):
+        columns = (model.id, model.name, model.value, model.units)
+        if self.use_timestamps:
+            columns += (model.create_time, model.modify_time)
+        results = self.sess.query(*columns).filter(*conditions).all()
+
+        def meta_opts(row):
+            opts = {'avu_id': row[model.id]}
+            if self.use_timestamps:
+                opts.update(create_time = row[model.create_time], modify_time=row[model.modify_time])
+            return opts
+
+        return [iRODSMeta(
+                    row[model.name],
+                    row[model.value],
+                    row[model.units],
+                    **meta_opts(row))
+               for row in results]
+
+    def add(self, model_cls, path, meta, **opts):
         # Avoid sending request with empty argument(s)
         if not(len(path) and len(meta.name) and len(meta.value)):
             raise ValueError('Empty value in ' + repr(meta))
@@ -75,7 +106,8 @@ class MetadataManager(Manager):
             path,
             meta.name,
             meta.value,
-            meta.units
+            meta.units,
+            **self._updated_keywords(opts)
         )
         request = iRODSMessage("RODS_API_REQ", msg=message_body,
                                int_info=api_number['MOD_AVU_METADATA_AN'])
@@ -84,7 +116,7 @@ class MetadataManager(Manager):
             response = conn.recv()
         logger.debug(response.int_info)
 
-    def remove(self, model_cls, path, meta):
+    def remove(self, model_cls, path, meta, **opts):
         resource_type = self._model_class_to_resource_type(model_cls)
         message_body = MetadataRequest(
             "rm",
@@ -92,7 +124,8 @@ class MetadataManager(Manager):
             path,
             meta.name,
             meta.value,
-            meta.units
+            meta.units,
+            **self._updated_keywords(opts)
         )
         request = iRODSMessage("RODS_API_REQ", msg=message_body,
                                int_info=api_number['MOD_AVU_METADATA_AN'])
@@ -101,7 +134,7 @@ class MetadataManager(Manager):
             response = conn.recv()
         logger.debug(response.int_info)
 
-    def copy(self, src_model_cls, dest_model_cls, src, dest):
+    def copy(self, src_model_cls, dest_model_cls, src, dest, **opts):
         src_resource_type = self._model_class_to_resource_type(src_model_cls)
         dest_resource_type = self._model_class_to_resource_type(dest_model_cls)
         message_body = MetadataRequest(
@@ -109,7 +142,8 @@ class MetadataManager(Manager):
             "-" + src_resource_type,
             "-" + dest_resource_type,
             src,
-            dest
+            dest,
+            **self._updated_keywords(opts)
         )
         request = iRODSMessage("RODS_API_REQ", msg=message_body,
                                int_info=api_number['MOD_AVU_METADATA_AN'])
@@ -119,7 +153,7 @@ class MetadataManager(Manager):
             response = conn.recv()
         logger.debug(response.int_info)
 
-    def set(self, model_cls, path, meta):
+    def set(self, model_cls, path, meta, **opts):
         resource_type = self._model_class_to_resource_type(model_cls)
         message_body = MetadataRequest(
             "set",
@@ -127,7 +161,8 @@ class MetadataManager(Manager):
             path,
             meta.name,
             meta.value,
-            meta.units
+            meta.units,
+            **self._updated_keywords(opts)
         )
         request = iRODSMessage("RODS_API_REQ", msg=message_body,
                                int_info=api_number['MOD_AVU_METADATA_AN'])
@@ -164,4 +199,3 @@ class MetadataManager(Manager):
             response = conn.recv()
         response_msg = response.get_json_encoded_struct()
         logger.debug("in atomic_metadata, server responded with: %r",response_msg)
-

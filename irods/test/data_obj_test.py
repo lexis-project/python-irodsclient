@@ -412,8 +412,9 @@ class TestDataObjOps(unittest.TestCase):
 
 
     def test_create_from_invalid_path__250(self):
-        possible_exceptions = { ex.CAT_UNKNOWN_COLLECTION:  (lambda serv_vsn : serv_vsn >= (4,2,9)),
-                                ex.SYS_INVALID_INPUT_PARAM: (lambda serv_vsn : serv_vsn <= (4,2,8))
+        possible_exceptions = { ex.SYS_INVALID_INPUT_PARAM: (lambda serv_vsn : serv_vsn <= (4,2,8)),
+                                ex.CAT_UNKNOWN_COLLECTION:  (lambda serv_vsn : (4,2,9) <= serv_vsn < (4,3,0)),
+                                ex.SYS_INVALID_FILE_PATH:   (lambda serv_vsn : (4,3,0) <= serv_vsn)
                               }
         raisedExc = None
         try:
@@ -902,9 +903,11 @@ class TestDataObjOps(unittest.TestCase):
             self.assertEqual(replica.number, i)
 
         # now trim odd-numbered replicas
+        # note (see irods/irods#4861): COPIES_KW might disappear in the future
+        options = {kw.COPIES_KW: 1}
         for i in [1, 3, 5]:
-            options = {kw.REPL_NUM_KW: str(i)}
-            obj.unlink(**options)
+            options[kw.REPL_NUM_KW] = str(i)
+            obj.trim(**options)
 
         # refresh object
         obj = session.data_objects.get(obj_path)
@@ -929,69 +932,70 @@ class TestDataObjOps(unittest.TestCase):
 
     def test_repave_replicas(self):
         # Can't do one step open/create with older servers
-        if self.sess.server_version <= (4, 1, 4):
+        server_vsn = self.sess.server_version
+        if server_vsn <= (4, 1, 4):
             self.skipTest('For iRODS 4.1.5 and newer')
+        try:
+            number_of_replicas = 7
+            session = self.sess
+            zone = session.zone
+            username = session.username
+            test_dir = '/tmp'
+            filename = 'repave_replica_test_file.txt'
+            test_file = os.path.join(test_dir, filename)
+            obj_path = '/{zone}/home/{username}/{filename}'.format(**locals())
+            ufs_resources = []
 
-        number_of_replicas = 7
-        session = self.sess
-        zone = session.zone
-        username = session.username
-        test_dir = '/tmp'
-        filename = 'repave_replica_test_file.txt'
-        test_file = os.path.join(test_dir, filename)
-        obj_path = '/{zone}/home/{username}/{filename}'.format(**locals())
+            # make test file
+            obj_content = u'foobar'
+            checksum = base64.b64encode(hashlib.sha256(obj_content.encode('utf-8')).digest()).decode()
+            with open(test_file, 'w') as f:
+                f.write(obj_content)
 
-        # make test file
-        obj_content = u'foobar'
-        checksum = base64.b64encode(hashlib.sha256(obj_content.encode('utf-8')).digest()).decode()
-        with open(test_file, 'w') as f:
-            f.write(obj_content)
+            # put test file onto default resource
+            options = {kw.REG_CHKSUM_KW: ''}
+            session.data_objects.put(test_file, obj_path, **options)
 
-        # put test file onto default resource
-        options = {kw.REG_CHKSUM_KW: ''}
-        session.data_objects.put(test_file, obj_path, **options)
+            # make ufs resources and replicate object
+            for i in range(number_of_replicas):
+                resource_name = unique_name(my_function_name(),i)
+                resource_type = 'unixfilesystem'
+                resource_host = session.host
+                resource_path = '/tmp/{}'.format(resource_name)
+                ufs_resources.append(session.resources.create(
+                    resource_name, resource_type, resource_host, resource_path))
 
-        # make ufs resources and replicate object
-        ufs_resources = []
-        for i in range(number_of_replicas):
-            resource_name = unique_name(my_function_name(),i)
-            resource_type = 'unixfilesystem'
-            resource_host = session.host
-            resource_path = '/tmp/{}'.format(resource_name)
-            ufs_resources.append(session.resources.create(
-                resource_name, resource_type, resource_host, resource_path))
+                session.data_objects.replicate(obj_path, resource=resource_name)
 
-            session.data_objects.replicate(obj_path, resource=resource_name)
+            # refresh object
+            obj = session.data_objects.get(obj_path)
 
-        # refresh object
-        obj = session.data_objects.get(obj_path)
+            # verify each replica's checksum
+            for replica in obj.replicas:
+                self.assertEqual(replica.checksum, 'sha2:{}'.format(checksum))
 
-        # verify each replica's checksum
-        for replica in obj.replicas:
-            self.assertEqual(replica.checksum, 'sha2:{}'.format(checksum))
+            # now repave test file
+            obj_content = u'bar'
+            checksum = base64.b64encode(hashlib.sha256(obj_content.encode('utf-8')).digest()).decode()
+            with open(test_file, 'w') as f:
+                f.write(obj_content)
 
-        # now repave test file
-        obj_content = u'bar'
-        checksum = base64.b64encode(hashlib.sha256(obj_content.encode('utf-8')).digest()).decode()
-        with open(test_file, 'w') as f:
-            f.write(obj_content)
+            options = {kw.REG_CHKSUM_KW: '', kw.ALL_KW: ''}
+            session.data_objects.put(test_file, obj_path, **options)
+            obj = session.data_objects.get(obj_path)
 
-        # update all replicas
-        options = {kw.REG_CHKSUM_KW: '', kw.ALL_KW: ''}
-        session.data_objects.put(test_file, obj_path, **options)
-        obj = session.data_objects.get(obj_path)
+            # verify each replica's checksum
+            for replica in obj.replicas:
+                self.assertEqual(replica.checksum, 'sha2:{}'.format(checksum))
 
-        # verify each replica's checksum
-        for replica in obj.replicas:
-            self.assertEqual(replica.checksum, 'sha2:{}'.format(checksum))
-
-        # remove object
-        obj.unlink(force=True)
-
-        # remove ufs resources
-        for resource in ufs_resources:
-            resource.remove()
-
+        finally:
+            # remove data object
+            data = self.sess.data_objects
+            if data.exists(obj_path):
+                data.unlink(obj_path,force=True)
+            # remove ufs resources
+            for resource in ufs_resources:
+                resource.remove()
 
     def test_get_replica_size(self):
         session = self.sess

@@ -50,3 +50,4 @@ GSI_OID = "1.3.6.1.4.1.3536.1.1"  # taken from http://j.mp/2hDeczm
 
 PAM_AUTH_PLUGIN = 'PAM'
 PAM_AUTH_SCHEME = PAM_AUTH_PLUGIN.lower()
+OPENID_AUTH_SCHEME = 'openid'

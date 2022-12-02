@@ -411,6 +411,33 @@ of the (type of) catalog object they once annotated:
 >>> len(list( session.query(ResourceMeta) ))
 0
 
+When altering a fetched iRODSMeta, we must copy it first to avoid errors, due to the fact the reference
+is cached by the iRODS object reference.  A shallow copy is sufficient:
+
+>>> meta = album.metadata.items()[0]
+>>> meta.units
+'quid'
+>>> import copy; meta = copy.copy(meta); meta.units = 'pounds sterling'
+>>> album.metadata[ meta.name ] = meta
+
+Fortunately, as of PRC >= 1.1.4, we can simply do this instead:
+
+>>> album.metadata.set( meta )
+
+In versions of iRODS 4.2.12 and later, we can also do:
+
+>>> album.metadata.set( meta, **{kw.ADMIN_KW: ''} )
+
+or even:
+
+>>> album.metadata(admin = True)[meta.name] = meta
+
+In v1.1.5, the "timestamps" keyword is provided to enable the loading of create and modify timestamps
+for every AVU returned from the server:
+
+>>> avus = album.metadata(timestamps = True).items()
+>>> avus[0].create_time
+datetime.datetime(2022, 9, 19, 15, 26, 7)
 
 Atomic operations on metadata
 -----------------------------

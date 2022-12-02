@@ -11,12 +11,17 @@ import datetime
 import irods.password_obfuscation as obf
 from irods import MAX_NAME_LEN
 from ast import literal_eval as safe_eval
+import re
+
+
+PAM_PW_ESC_PATTERN = re.compile(r'([@=&;])')
 
 from irods.message import (
     iRODSMessage, StartupPack, AuthResponse, AuthChallenge, AuthPluginOut,
-    OpenedDataObjRequest, FileSeekResponse, StringStringMap, VersionResponse,
-    OpenIDAuthMessage, ClientServerNegotiation, Error, PluginAuthMessage, GetTempPasswordOut)
-from irods.exception import (get_exception_by_code, NetworkException, nominal_code)
+
+    OpenedDataObjRequest, OpenIDAuthMessage, FileSeekResponse, StringStringMap, VersionResponse,
+    PluginAuthMessage, ClientServerNegotiation, Error, GetTempPasswordOut)
+from irods.exception import (get_exception_by_code, NetworkException, nominal_code, ExceptionOpenIDAuthUrl)
 from irods.message import (PamAuthRequest, PamAuthRequestOut)
 
 
@@ -30,7 +35,7 @@ from irods import (
     AUTH_SCHEME_KEY, AUTH_USER_KEY, AUTH_PWD_KEY, AUTH_TTL_KEY,
     NATIVE_AUTH_SCHEME,
     GSI_AUTH_PLUGIN, GSI_AUTH_SCHEME, GSI_OID,
-    PAM_AUTH_SCHEME)
+    PAM_AUTH_SCHEME, OPENID_AUTH_SCHEME)
 from irods.client_server_negotiation import (
     perform_negotiation,
     validate_policy,
@@ -45,9 +50,11 @@ from irods.exception import iRODSException
 
 logger = logging.getLogger(__name__)
 
+
 class ExceptionOpenIDAuthUrl(iRODSException):
     def __init__(self, URL):
         self.URL=URL
+
 
 try:
     basestring
@@ -87,6 +94,8 @@ class Connection(object):
             self._login_openid()
         elif scheme == PAM_AUTH_SCHEME:
             self._login_pam()
+        elif scheme == 'openid':
+            self._login_openid()
         else:
             raise ValueError("Unknown authentication scheme %s" % scheme)
         self.create_time = datetime.datetime.now()
@@ -306,18 +315,22 @@ class Connection(object):
         # is already closed). This makes it safe to call disconnect multiple
         # times on the same connection. The first call cleans up the resources
         # and next calls are no-ops
-        if self.socket and getattr(self, "_disconnected", False) == False and self.socket.fileno() != -1:
-            disconnect_msg = iRODSMessage(msg_type='RODS_DISCONNECT')
-            self.send(disconnect_msg)
-            try:
-                # SSL shutdown handshake
-                self.socket = self.socket.unwrap()
-            except AttributeError:
-                pass
-            self.socket.shutdown(socket.SHUT_RDWR)
-            self.socket.close()
-            self.socket = None
-            self._disconnected = True
+        try:
+            if self.socket and getattr(self, "_disconnected", False) == False and self.socket.fileno() != -1:
+                disconnect_msg = iRODSMessage(msg_type='RODS_DISCONNECT')
+                self.send(disconnect_msg)
+                try:
+                    # SSL shutdown handshake
+                    self.socket = self.socket.unwrap()
+                except AttributeError:
+                    pass
+                self.socket.shutdown(socket.SHUT_RDWR)
+                self.socket.close()
+        finally:
+            self._disconnected = True  # Issue 368 - because of undefined destruction order during interpreter shutdown,
+            self.socket = None         # as well as the fact that unhandled exceptions are ignored in __del__, we'd at least
+                                       # like to ensure as much cleanup as possible, thus preventing the above socket shutdown
+                                       # procedure from running too many times and creating confusing messages
 
     def recvall(self, n):
         # Helper function to recv n bytes or return None if EOF is hit
@@ -441,15 +454,13 @@ class Connection(object):
 
         logger.info("GSI authorization validated")
 
-# using same method as auth_microservice/token_service/util.py:sha256
     def sha256(self, s):
-      if not is_str(s):
-        logging.debug("not a string instance: %s", s)
-        return None
-      hasher = hashlib.sha256()
-      hasher.update(s.encode('utf-8'))
-      return hasher.hexdigest()
-
+        if not is_str(s):
+            logging.debug("not a string instance: %s", s)
+            return None
+        hasher = hashlib.sha256()
+        hasher.update(s.encode('utf-8'))
+        return hasher.hexdigest()
 
     def openid_client_auth_request(self):
         if getattr(self.account, 'openid_provider', None):
@@ -460,17 +471,18 @@ class Connection(object):
         if getattr(self.account, 'session_id', None):
             context += ';session_id=' + self.account.session_id
         elif getattr(self.account, 'access_token', None):
-# hash if >1024 bytes
-# using same method as auth_microservice/token_service/util.py:sha256
-            at=self.account.access_token
-            if len(at)>1024:
-               at=self.sha256(at)
+
+            # hash if >1024 bytes
+            # using same method as auth_microservice/token_service/util.py:sha256
+            at = self.account.access_token
+            if len(at) > 1024:
+                at = self.sha256(at)
             context += ';access_token=' + at
         elif getattr(self.account, 'user_key', None):
             context += ';user_key=' + self.account.user_key
         else:
             logger.info('OpenID auth request requires either a session_id, an access_token or a user_key. '
-                            + 'Failure to provide one will require a new authentication flow')
+                        + 'Failure to provide one will require a new authentication flow')
 
         message_body = OpenIDAuthMessage(
             auth_scheme_='openid',
@@ -484,8 +496,10 @@ class Connection(object):
     def openid_client_auth_response(self):
         message = '%s=%s' % (AUTH_SCHEME_KEY, GSI_AUTH_SCHEME)
         # IMPORTANT! padding
-        #len_diff = RESPONSE_LEN - len(message)
-        #message += "\0" * len_diff
+
+        # len_diff = RESPONSE_LEN - len(message)
+        # message += "\0" * len_diff
+
         message_body = AuthResponse(
             response=message,
             username=self.account.proxy_user + '#' + self.account.proxy_zone
@@ -499,8 +513,11 @@ class Connection(object):
         d = {}
         for term in s.split(';'):
             p = term.split('=')
-            if len(p) == 2: d[p[0]] = p[1]
-            else: d[p[0]] = None
+
+            if len(p) == 2:
+                d[p[0]] = p[1]
+            else:
+                d[p[0]] = None
         return d
 
 
@@ -545,16 +562,16 @@ class Connection(object):
             session_id = read_msg(wrapped)
         else:
             if (not self.block_on_authURL):
-               raise ExceptionOpenIDAuthUrl(first)
+                raise ExceptionOpenIDAuthUrl(first)
             logger.debug('\n{}\n'.format(first))
             print('OpenID Authorization URL:\n' + first)
-            self.pool.currentAuth=first
-#this blocks, so info channel backwards neets to be setup here
+            self.pool.currentAuth = first
+            # this blocks, so info channel backwards neets to be setup here
             user_name = read_msg(wrapped)
             session_id = read_msg(wrapped)
-            self.pool.currentAuth=None
+            self.pool.currentAuth = None
             print('Received session information: {}'.format(session_id))
-        
+
         if user_name and session_id:
             self.openid_client_auth_response()
         else:
@@ -565,8 +582,10 @@ class Connection(object):
 
         time_to_live_in_seconds = 60
 
+        pam_password = PAM_PW_ESC_PATTERN.sub(lambda m: '\\'+m.group(1), self.account.password)
+
         ctx_user = '%s=%s' % (AUTH_USER_KEY, self.account.client_user)
-        ctx_pwd = '%s=%s' % (AUTH_PWD_KEY, self.account.password)
+        ctx_pwd = '%s=%s' % (AUTH_PWD_KEY, pam_password)
         ctx_ttl = '%s=%s' % (AUTH_TTL_KEY, str(time_to_live_in_seconds))
 
         ctx = ";".join([ctx_user, ctx_pwd, ctx_ttl])
@@ -581,7 +600,7 @@ class Connection(object):
 
             message_body = PamAuthRequest(
                 pamUser=self.account.client_user,
-                pamPassword=self.account.password,
+                pamPassword=pam_password,
                 timeToLive=time_to_live_in_seconds)
         else:
 
@@ -685,6 +704,7 @@ class Connection(object):
         elif b'\x00' in encoded_pwd:
             encoded_pwd_array = bytearray(encoded_pwd)
             encoded_pwd = bytes(encoded_pwd_array.replace(b'\x00', b'\x01'))
+
 
         pwd_msg = AuthResponse(
             response=encoded_pwd, username=self.account.proxy_user)
