@@ -451,6 +451,11 @@ class PamAuthRequestOut(Message):
     @builtins.property
     def result_(self): return self.irodsPamPassword
 
+class OpenIDAuthMessage(Message):
+    _name = 'authPlugReqInp_PI'
+    auth_scheme_ = StringProperty()
+    context_ = StringProperty()
+
 
 
 # define InxIvalPair_PI "int iiLen; int *inx(iiLen); int *ivalue(iiLen);"

@@ -118,6 +118,11 @@ class SystemException(iRODSException):
     pass
 
 
+class ExceptionOpenIDAuthUrl(iRODSException):
+    def __init__(self, URL):
+        self.URL=URL
+
+
 class SYS_SOCK_OPEN_ERR(SystemException):
     code = -1000
 

@@ -18,9 +18,9 @@ PAM_PW_ESC_PATTERN = re.compile(r'([@=&;])')
 
 from irods.message import (
     iRODSMessage, StartupPack, AuthResponse, AuthChallenge, AuthPluginOut,
-    OpenedDataObjRequest, FileSeekResponse, StringStringMap, VersionResponse,
+    OpenedDataObjRequest, OpenIDAuthMessage, FileSeekResponse, StringStringMap, VersionResponse,
     PluginAuthMessage, ClientServerNegotiation, Error, GetTempPasswordOut)
-from irods.exception import (get_exception_by_code, NetworkException, nominal_code)
+from irods.exception import (get_exception_by_code, NetworkException, nominal_code, ExceptionOpenIDAuthUrl)
 from irods.message import (PamAuthRequest, PamAuthRequestOut)
 
 
@@ -34,7 +34,7 @@ from irods import (
     AUTH_SCHEME_KEY, AUTH_USER_KEY, AUTH_PWD_KEY, AUTH_TTL_KEY,
     NATIVE_AUTH_SCHEME,
     GSI_AUTH_PLUGIN, GSI_AUTH_SCHEME, GSI_OID,
-    PAM_AUTH_SCHEME)
+    PAM_AUTH_SCHEME, OPENID_AUTH_SCHEME)
 from irods.client_server_negotiation import (
     perform_negotiation,
     validate_policy,
@@ -46,6 +46,17 @@ from irods.client_server_negotiation import (
 from irods.api_number import api_number
 
 logger = logging.getLogger(__name__)
+
+try:
+    basestring
+except NameError:
+    # basestring doesn't exist in py3
+    # (or better yet: str in py27 doesn't include unicode)
+    basestring = str
+
+
+def is_str(s):
+    return isinstance(s, basestring)
 
 class PlainTextPAMPasswordError(Exception): pass
 
@@ -71,6 +82,8 @@ class Connection(object):
             self._login_gsi()
         elif scheme == PAM_AUTH_SCHEME:
             self._login_pam()
+        elif scheme == 'openid':
+            self._login_openid()
         else:
             raise ValueError("Unknown authentication scheme %s" % scheme)
         self.create_time = datetime.datetime.now()
@@ -428,6 +441,125 @@ class Connection(object):
         self.gsi_client_auth_response()
 
         logger.info("GSI authorization validated")
+
+    def sha256(self, s):
+        if not is_str(s):
+            logging.debug("not a string instance: %s", s)
+            return None
+        hasher = hashlib.sha256()
+        hasher.update(s.encode('utf-8'))
+        return hasher.hexdigest()
+
+    def openid_client_auth_request(self):
+        if getattr(self.account, 'openid_provider', None):
+            context = 'a_user={};provider={}'.format(self.account.proxy_user, self.account.openid_provider)
+        else:
+            context = 'a_user={}'.format(self.account.proxy_user)
+
+        if getattr(self.account, 'session_id', None):
+            context += ';session_id=' + self.account.session_id
+        elif getattr(self.account, 'access_token', None):
+            # hash if >1024 bytes
+            # using same method as auth_microservice/token_service/util.py:sha256
+            at = self.account.access_token
+            if len(at) > 1024:
+                at = self.sha256(at)
+            context += ';access_token=' + at
+        elif getattr(self.account, 'user_key', None):
+            context += ';user_key=' + self.account.user_key
+        else:
+            logger.info('OpenID auth request requires either a session_id, an access_token or a user_key. '
+                        + 'Failure to provide one will require a new authentication flow')
+
+        message_body = OpenIDAuthMessage(
+            auth_scheme_='openid',
+            context_=context
+        )
+        auth_req = iRODSMessage(
+            msg_type='RODS_API_REQ', msg=message_body, int_info=1201)
+        self.send(auth_req)
+        return self.recv()
+
+    def openid_client_auth_response(self):
+        message = '%s=%s' % (AUTH_SCHEME_KEY, GSI_AUTH_SCHEME)
+        # IMPORTANT! padding
+        # len_diff = RESPONSE_LEN - len(message)
+        # message += "\0" * len_diff
+        message_body = AuthResponse(
+            response=message,
+            username=self.account.proxy_user + '#' + self.account.proxy_zone
+        )
+        auth_resp = iRODSMessage(
+            msg_type='RODS_API_REQ', int_info=704, msg=message_body)
+        self.send(auth_resp)
+        self.recv()
+
+    def parse_kvp_string(self, s):
+        d = {}
+        for term in s.split(';'):
+            p = term.split('=')
+            if len(p) == 2:
+                d[p[0]] = p[1]
+            else:
+                d[p[0]] = None
+        return d
+
+    def _login_openid(self):
+        def send_msg(sock, msg):
+            # messages for openid are sent as [len][message] where len is a little-endian integer
+            msg_len = struct.pack('<I', len(msg))
+            logger.debug('send_msg(msg={}), msg_len: {}'.format(msg, msg_len))
+            sock.send(msg_len)
+            sock.send(msg.encode('utf-8'))
+
+        def read_msg(sock):
+            msg_len = int(struct.unpack('<I', sock.recv(4))[0])
+            logger.debug('read_msg, msg_len: {}'.format(msg_len))
+            return sock.recv(msg_len).decode('utf-8')
+
+        req_result = self.openid_client_auth_request()
+        import xml.etree.ElementTree as ET
+        elem = ET.fromstring(req_result.msg).find('result_')
+        if elem is None:
+            raise RuntimeError('openid auth request response did not contain a result entry')
+        result_ = elem.text
+        logger.debug('result_: ' + result_)
+        result_map = self.parse_kvp_string(result_)
+        if 'port' not in result_map or 'nonce' not in result_map:
+            logger.info('req_result kvp map missing values: [%s]' % req_result)
+            raise RuntimeError('openid auth request result was missing required values')
+
+        host = self.account.host
+        port = int(result_map['port'])
+        nonce = result_map['nonce']
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # TODO currently disabling ssl cert validation
+        wrapped = ssl.wrap_socket(s, cert_reqs=ssl.CERT_NONE, ssl_version=ssl.PROTOCOL_SSLv23)
+        logger.debug('host: {}, port: {}, nonce: {}'.format(host, port, nonce))
+
+        wrapped.connect((host, port))
+        send_msg(wrapped, nonce)
+        first = read_msg(wrapped)
+        if first == 'SUCCESS':
+            user_name = read_msg(wrapped)
+            session_id = read_msg(wrapped)
+        else:
+            if (not self.block_on_authURL):
+                raise ExceptionOpenIDAuthUrl(first)
+            logger.debug('\n{}\n'.format(first))
+            print('OpenID Authorization URL:\n' + first)
+            self.pool.currentAuth = first
+            # this blocks, so info channel backwards neets to be setup here
+            user_name = read_msg(wrapped)
+            session_id = read_msg(wrapped)
+            self.pool.currentAuth = None
+            print('Received session information: {}'.format(session_id))
+
+        if user_name and session_id:
+            self.openid_client_auth_response()
+        else:
+            # no point trying an auth reponse if it failed
+            logger.error('Did not complete OpenID authentication flow')
 
     def _login_pam(self):
 
